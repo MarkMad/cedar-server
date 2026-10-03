@@ -145,7 +145,10 @@ work. Switching voices generates separate cached audio.
 
 On a four-core DietPi VM, start with `CEDAR_TTS_CONCURRENCY=1`,
 `CEDAR_KOKORO_CPUS=3`, and the override's default
-`CEDAR_POCKET_CPUS=2`. The CPU limits are ceilings, not reserved cores.
+`CEDAR_POCKET_CPUS=2`. The Pocket setup uses int8 inference and prepares up to
+six upcoming sentences in the cache (`CEDAR_TTS_LOOKAHEAD=6`). It can only
+prepare audio as fast as the VM generates it, so some pauses may remain if
+inference takes longer than playback. The CPU limits are ceilings, not reserved cores.
 To return to the standard setup:
 
 ```bash
