@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .. import db, lang, pdflayout, settings, tts
@@ -545,7 +545,7 @@ def remove_bookmark(doc_id: int, idx: int):
 
 
 class HighlightIn(BaseModel):
-    idx: int
+    idx: int = Field(ge=0)
     cs: int
     ce: int
     color: str | None = None
@@ -562,7 +562,7 @@ def add_highlight(doc_id: int, body: HighlightIn):
     """Mark a span of one sentence. The client sends character offsets into the
     sentence text it is showing, so the span survives re-rendering at any font
     size — but not a rechunk, which is why they're clamped to the sentence."""
-    sent = db.get_sentence(doc_id, max(0, body.idx))
+    sent = db.get_sentence(doc_id, body.idx)
     if sent is None:
         raise HTTPException(404, "Sentence not found.")
     n = len(sent["text"])
