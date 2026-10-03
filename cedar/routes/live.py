@@ -8,6 +8,7 @@ is cached on disk by text+voice like any other.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -35,21 +36,26 @@ class SpeakIn(BaseModel):
 
 
 @router.post("/sentences")
-def sentences(body: PageIn):
+async def sentences(body: PageIn):
     """Split one page into sentences and say which voice should read it: the
     page's own language decides, through the per-language voice picks, the
     same way a document's voice is resolved."""
     text = (body.text or "").strip()
     if len(text) > _MAX_PAGE_CHARS:
         raise HTTPException(413, "That is more than one page of text.")
-    main, speed = settings.reading_defaults()
-    if not text:
-        return {"sentences": [], "lang": None, "voice": main, "speed": speed}
-    result = chunk_plain_text("", text)
-    detected = lang.detect_chunks(result.chunks)
-    voice = lang.resolve(detected, settings.chosen_voices(), main)
-    return {"sentences": [c.text for c in result.chunks], "lang": detected,
-            "voice": voice, "speed": speed}
+    def prepare() -> dict:
+        main, speed = settings.reading_defaults()
+        if not text:
+            return {"sentences": [], "lang": None, "voice": main, "speed": speed}
+        result = chunk_plain_text("", text)
+        detected = lang.detect_chunks(result.chunks)
+        voice = lang.resolve(detected, settings.chosen_voices(), main)
+        return {"sentences": [c.text for c in result.chunks], "lang": detected,
+                "voice": voice, "speed": speed}
+
+    page = await asyncio.to_thread(prepare)
+    tts.prefetch_live_page(page["voice"], page["sentences"])
+    return page
 
 
 @router.post("/tts")

@@ -1,0 +1,31 @@
+# Add Pocket voices to Cedar while retaining Kokoro for its other languages.
+# docker compose -f docker-compose.yml -f docker-compose.pocket.yml up -d --build
+services:
+  pocket:
+    build:
+      context: .
+      dockerfile: Dockerfile.pocket
+    image: cedar-pocket-tts:latest
+    cpus: ${CEDAR_POCKET_CPUS:-2}
+    restart: unless-stopped
+    # Int8 inference reduces work on x86 CPUs such as the N5105.
+    command: ["pocket-tts", "serve", "--host", "0.0.0.0", "--quantize"]
+    environment:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    volumes:
+      - pocket-cache:/root/.cache/pocket_tts
+      - pocket-hf-cache:/root/.cache/huggingface
+    security_opt:
+      - no-new-privileges:true
+
+  cedar:
+    environment:
+      CEDAR_POCKET_URL: http://pocket:8000
+      CEDAR_TTS_LOOKAHEAD: ${CEDAR_TTS_LOOKAHEAD:-6}
+    depends_on:
+      - pocket
+
+volumes:
+  pocket-cache:
+  pocket-hf-cache:

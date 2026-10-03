@@ -36,7 +36,9 @@ async def _kokoro_ok() -> bool:
     async with _health_lock:
         if time.monotonic() - _health[0] < _HEALTH_TTL_S:
             return _health[1]
-        ok = await tts.health()
+        # Keep the app's existing kokoro_ok field meaningful when Pocket is the
+        # selected voice and Kokoro happens to be unavailable.
+        ok = await tts.health() or await tts.pocket_health()
         _health = (time.monotonic(), ok)
         return ok
 

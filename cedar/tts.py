@@ -44,7 +44,8 @@ from typing import Dict, List, Optional, Tuple
 import httpx
 
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_DIR, AUDIO_FORMAT,
-                     AUDIO_SOURCE_FORMAT, KOKORO_URL, TTS_CONCURRENCY, TTS_LOOKAHEAD, TTS_TIMEOUT)
+                     AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_URL, TTS_CONCURRENCY,
+                     TTS_LOOKAHEAD, TTS_TIMEOUT)
 
 _CACHE = AUDIO_DIR / "cache"
 _CACHE.mkdir(parents=True, exist_ok=True)
@@ -499,12 +500,24 @@ def _estimate_words(text: str, duration: float) -> List[dict]:
     return out
 
 
+# Cedar's app understands these English voice-id prefixes. The suffix is the
+# built-in voice name accepted by Pocket's /tts endpoint.
+_POCKET_VOICES = {
+    "af_pocket_alba": "alba",
+    "af_pocket_anna": "anna",
+    "am_pocket_marius": "marius",
+    "am_pocket_jean": "jean",
+}
+
+
 def _key(text: str, voice: str) -> str:
     # The "1.00" segment is the speed that used to be part of the key. All
     # first-party clients have always requested 1.0 (tempo is playback-rate,
     # client-side), so keeping the literal means every pre-existing cache
     # entry stays valid.
-    h = hashlib.sha1(f"{voice}|1.00|{text}".encode("utf-8")).hexdigest()
+    # Keep every old Kokoro key valid, but isolate Pocket's different audio.
+    engine = "pocket|" if voice in _POCKET_VOICES else ""
+    h = hashlib.sha1(f"{engine}{voice}|1.00|{text}".encode("utf-8")).hexdigest()
     return h
 
 
@@ -825,6 +838,17 @@ def prefetch_document(doc_id: int, voice: str, token: object, texts: List[str]) 
     _dispatch()
 
 
+def prefetch_live_page(voice: str, texts: List[str]) -> None:
+    """Warm Pocket's first live-reading clips while the client displays the page."""
+    if voice not in _POCKET_VOICES or not TTS_LOOKAHEAD or not texts:
+        return
+    # Document ids are positive, so -1 is a separate window for the latest
+    # captured page. A new page discards stale queued work but keeps an active
+    # inference cacheable, using the same bounded scheduler as documents.
+    token = begin_document_request(-1, voice)
+    prefetch_document(-1, voice, token, texts)
+
+
 async def shutdown_synthesis() -> None:
     """Release queued jobs and join active tasks before the app loop closes."""
     global _closing
@@ -952,7 +976,36 @@ async def _ask_kokoro(text: str, voice: str, fmt: str) -> tuple[bytes, List[dict
             data.get("timestamps") or [])
 
 
+async def _ask_pocket(text: str, voice: str) -> bytes:
+    """Pocket's official server accepts form fields and returns a WAV stream."""
+    resp = await _client.post(f"{POCKET_URL}/tts", data={
+        "text": text, "voice_url": _POCKET_VOICES[voice],
+    })
+    resp.raise_for_status()
+    if not resp.content:
+        raise ValueError("Pocket TTS returned empty audio")
+    return resp.content
+
+
+async def _synth_pocket(key: str, text: str, voice: str) -> dict:
+    if not POCKET_URL:
+        raise RuntimeError("Pocket TTS is not configured")
+    started = time.monotonic()
+    wav = await _ask_pocket(text, voice)
+    synth_s = time.monotonic() - started
+    # Cedar's client contract is MP3. Unlike Kokoro, Pocket cannot supply an
+    # MP3 fallback, so an encoder failure must be visible to the caller.
+    audio = await asyncio.get_running_loop().run_in_executor(_ENCODE_POOL, _encode, wav)
+    if audio is None:
+        raise RuntimeError("Could not encode Pocket TTS audio as MP3")
+    result = await asyncio.to_thread(_process_and_store, key, text, audio, [], AUDIO_BITRATE_KBPS)
+    result["_timing"] = (synth_s, time.monotonic() - started - synth_s)
+    return result
+
+
 async def _synth_uncached(key: str, text: str, voice: str) -> dict:
+    if voice in _POCKET_VOICES:
+        return await _synth_pocket(key, text, voice)
     started = time.monotonic()
     synth_s = 0.0
 
@@ -1098,7 +1151,7 @@ async def list_voices() -> List[str]:
             resp.raise_for_status()
             data = resp.json()
     except Exception:
-        return []
+        data = []
     # Endpoint may return {"voices": [...]} or a list of objects with "id".
     if isinstance(data, dict):
         voices = data.get("voices") or data.get("data") or []
@@ -1112,7 +1165,20 @@ async def list_voices() -> List[str]:
             vid = v.get("id") or v.get("name")
             if vid:
                 out.append(vid)
+    if POCKET_URL and await pocket_health():
+        out.extend(_POCKET_VOICES)
     return sorted(set(out))
+
+
+async def pocket_health() -> bool:
+    if not POCKET_URL:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(f"{POCKET_URL}/")
+            return resp.status_code == 200
+    except Exception:
+        return False
 
 
 async def health() -> bool:
