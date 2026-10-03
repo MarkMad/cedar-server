@@ -839,8 +839,8 @@ def prefetch_document(doc_id: int, voice: str, token: object, texts: List[str]) 
 
 
 def prefetch_live_page(voice: str, texts: List[str]) -> None:
-    """Warm the first live-reading clips while the client displays the page."""
-    if not TTS_LOOKAHEAD or not texts:
+    """Warm Pocket's first live-reading clips while the client displays the page."""
+    if voice not in _POCKET_VOICES or not TTS_LOOKAHEAD or not texts:
         return
     # Document ids are positive, so -1 is a separate window for the latest
     # captured page. A new page discards stale queued work but keeps an active

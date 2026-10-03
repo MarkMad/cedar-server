@@ -77,6 +77,11 @@ def test_live_page_starts_next_clips_before_playback_requests_them(monkeypatch):
     asyncio.run(run())
 
 
+def test_live_page_does_not_precompute_kokoro_voice():
+    tts.prefetch_live_page("af_heart", ["One line", "Another line"])
+    assert not tts._inflight
+
+
 def test_disconnected_caller_does_not_cancel_shared_synthesis(monkeypatch):
     async def run():
         cache = {}

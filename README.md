@@ -149,7 +149,7 @@ On a four-core DietPi VM, start with `CEDAR_TTS_CONCURRENCY=1`,
 six upcoming sentences in the cache (`CEDAR_TTS_LOOKAHEAD=6`). It can only
 prepare audio as fast as the VM generates it, so some pauses may remain if
 inference takes longer than playback. The CPU limits are ceilings, not reserved cores.
-Live reading also begins warming the first few lines as soon as Cedar receives
+Pocket live reading also begins warming the first few lines as soon as Cedar receives
 the captured page, before the app requests speech for each line.
 To return to the standard setup:
 
