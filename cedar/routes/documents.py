@@ -7,6 +7,7 @@ language (see `_with_voice`); neither is stored on the document.
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import logging
 import re
@@ -23,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from .. import db, lang, pdflayout, settings, tts
 from ..chunker import chunk_article, chunk_plain_text, extract_epub, extract_pdf
 from ..config import MAX_UPLOAD_BYTES, MEDIA_DIR, TTS_LOOKAHEAD, UPLOAD_DIR
+from ..pdfsafe import run_pdf
 from ..safefetch import TooLargeError, UnsafeUrlError, safe_fetch
 
 router = APIRouter(prefix="/api")
@@ -407,18 +409,14 @@ def thumb(doc_id: int):
         if not src.exists():
             raise HTTPException(404, "PDF file missing.")
         try:
-            import fitz
-            with fitz.open(str(src)) as pdf_:
-                page = pdf_[0]
-                zoom = 320 / max(page.rect.width, 1)  # ~320px wide, plenty for a list row
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-                path.parent.mkdir(parents=True, exist_ok=True)
-                pix.save(str(path), jpg_quality=82)
+            jpeg = base64.b64decode(run_pdf("thumbnail", str(src)), validate=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(jpeg)
         except Exception:
             path.unlink(missing_ok=True)  # never cache a half-written cover
             raise HTTPException(404, "Could not render a cover for this PDF.")
     return FileResponse(path, media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=604800"})
+                        headers={"Cache-Control": "private, max-age=604800"})
 
 
 @router.get("/documents/{doc_id}/media/{ord}")

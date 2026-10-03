@@ -49,7 +49,7 @@ def cover(gid: int):
         raise HTTPException(404, "No cover for this book.")
     # Covers never change once mirrored — let clients cache them hard.
     return FileResponse(p, media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=604800, immutable"})
+                        headers={"Cache-Control": "private, max-age=604800, immutable"})
 
 
 @router.post("/books/{gid}/add")

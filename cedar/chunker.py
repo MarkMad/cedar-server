@@ -869,19 +869,39 @@ def extract_epub(source, fallback_title: str) -> ExtractResult:
 
 
 def extract_pdf(path: str, fallback_title: str) -> ExtractResult:
+    """Extract a PDF without exposing the server to native-parser resource use."""
+    from .pdfsafe import run_pdf
+
+    result = run_pdf("extract", path, fallback_title=fallback_title)
+    result["chunks"] = [Chunk(**chunk) for chunk in result["chunks"]]
+    result["toc"] = [TocItem(**item) for item in result["toc"]]
+    result["media"] = [MediaItem(**item) for item in result["media"]]
+    return ExtractResult(**result)
+
+
+def _extract_pdf_local(path: str, fallback_title: str) -> ExtractResult:
+    """Worker-only extraction; native calls are contained by process limits."""
+    from .pdfsafe import PDF_MAX_PAGES, PDF_MAX_TEXT, PdfLimitError
+
     doc = fitz.open(path)
     try:
         title = (doc.metadata or {}).get("title") or ""
         title = title.strip() or fallback_title
         num_pages = doc.page_count
+        if num_pages > PDF_MAX_PAGES:
+            raise PdfLimitError("PDF has too many pages.")
 
         # Pass 1: blocks with geometry, so page furniture can be recognized by
         # its repetition across pages before anything is flattened to text.
         pages_blocks: List[List[tuple]] = []
         page_heights: List[float] = []
+        text_size = 0
         for pno in range(num_pages):
             page = doc.load_page(pno)
             pages_blocks.append(_page_blocks(page))
+            text_size += sum(len(block[4]) for block in pages_blocks[-1])
+            if text_size > PDF_MAX_TEXT:
+                raise PdfLimitError("PDF contains too much text.")
             page_heights.append(float(page.rect.height))
         furniture = _repeating_furniture(pages_blocks, page_heights)
 

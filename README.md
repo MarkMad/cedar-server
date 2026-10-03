@@ -234,6 +234,33 @@ over.
 
 ## Security
 
+PDF imports, cover rendering and highlighting run in disposable worker processes.
+At most two workers run together, each with a 30-second deadline and a 32 MiB
+result limit. Linux workers also have a 768 MiB address-space limit and a CPU
+time limit. PDF imports accept at most 2,000 pages and 16 MiB of extracted text;
+documents above these limits are rejected. Other operating systems retain the
+process, deadline, concurrency and output limits, but lack the Linux memory cap.
+Pocket drops to an unprivileged user before serving; existing model-cache volumes
+are reused and their ownership is adjusted on first start after this update.
+Authenticated thumbnail responses allow only private client caching. If a proxy
+cached thumbnails before this update, purge those existing cached responses.
+
+HTTP sends the owner key and document contents unencrypted, including on Wi-Fi.
+For encrypted access, use a trusted VPN or HTTPS. An optional direct HTTPS
+override is available if you already have a certificate trusted by your devices:
+
+1. Set `CEDAR_TLS_CERT_DIR` in `.env` to a directory containing `fullchain.pem`
+   and `privkey.pem`. The certificate must match the hostname used in the app.
+2. Give the Cedar process (UID/GID 1000) read access to that directory and key.
+   Keep the private key restricted, for example to its owner and group with mode 0640.
+3. Run `docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build`.
+   For Pocket, add `-f docker-compose.pocket.yml` before `up`.
+4. Update the app's server address to `https://your-hostname:8000` (or your configured port).
+
+This override serves HTTPS on the existing port; it does not issue or renew
+certificates. Renew them through your certificate provider and restart Cedar
+to load the replacement. Do not disable certificate verification in the app.
+
 The server is written expecting its port to end up on the internet, but the
 safe default is still: don't. On your LAN or a VPN it cannot be reached from
 outside at all. If you do publish it:

@@ -1,0 +1,23 @@
+# Optional TLS using an existing certificate trusted by your devices.
+# docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+services:
+  cedar:
+    command:
+      - uvicorn
+      - cedar.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --timeout-keep-alive
+      - "120"
+      - --no-server-header
+      - --ssl-certfile
+      - /certificates/fullchain.pem
+      - --ssl-keyfile
+      - /certificates/privkey.pem
+    volumes:
+      - type: bind
+        source: ${CEDAR_TLS_CERT_DIR:?Set CEDAR_TLS_CERT_DIR to your certificate directory}
+        target: /certificates
+        read_only: true
