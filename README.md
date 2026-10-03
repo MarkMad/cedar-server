@@ -123,6 +123,38 @@ Not `localhost`: your phone has to find the machine on your Wi-Fi.
 - **Wrong key?** Copy it again with the `cat` command in step 2.
 - **A firewall on the server** has to allow incoming TCP 8000.
 
+### Optional: Pocket TTS voices
+
+On a CPU-only server, you can add four English Pocket TTS voices while keeping
+Kokoro available for other languages. From the repository directory, run:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.pocket.yml up -d --build
+```
+
+The first start builds Pocket TTS and downloads its model. When it is ready,
+refresh the app's voice picker and choose Pocket Alba, Anna, Marius, or Jean.
+The Pocket container is private to the Compose network. The same Cedar address,
+owner key, library, and saved reading positions continue to work.
+
+Pocket's server returns audio without word timestamps. Cedar estimates each
+word's timing from the finished audio, so highlighting is approximate. Cedar
+encodes Pocket's WAV response to MP3 with `lame`; the standard Cedar image
+already includes it. If Pocket is unavailable, existing Kokoro voices still
+work. Switching voices generates separate cached audio.
+
+On a four-core DietPi VM, start with `CEDAR_TTS_CONCURRENCY=1`,
+`CEDAR_KOKORO_CPUS=3`, and the override's default
+`CEDAR_POCKET_CPUS=2`. The CPU limits are ceilings, not reserved cores.
+To return to the standard setup:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.pocket.yml down
+docker compose up -d
+```
+
+Do not add `-v` to `down`: the named volumes hold Cedar's library and key.
+
 <details>
 <summary><b>Choose the key or the port yourself</b></summary>
 

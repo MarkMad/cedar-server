@@ -21,6 +21,8 @@ for d in (DATA_DIR, UPLOAD_DIR, AUDIO_DIR, MEDIA_DIR):
 # Kokoro-FastAPI, the voice engine. In the compose bundle it is reachable by
 # service name; running the API by hand on the same machine, localhost.
 KOKORO_URL = os.environ.get("CEDAR_KOKORO_URL", "http://localhost:8880").rstrip("/")
+# Empty unless the optional Pocket TTS Compose override is in use.
+POCKET_URL = os.environ.get("CEDAR_POCKET_URL", "").rstrip("/")
 
 # The owner key. Every /api/* request except /api/health must present it. Empty
 # here means "generate one on first start and keep it in KEY_PATH" (see auth.py).
