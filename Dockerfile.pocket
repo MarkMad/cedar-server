@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 # Use the CPU PyTorch wheels; the default Linux wheel set also downloads CUDA.
-RUN pip install --no-cache-dir pocket-tts --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir pocket-tts==3.3.0 --extra-index-url https://download.pytorch.org/whl/cpu
 
 EXPOSE 8000
 CMD ["pocket-tts", "serve", "--host", "0.0.0.0"]
