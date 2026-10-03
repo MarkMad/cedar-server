@@ -1,7 +1,19 @@
 FROM python:3.12-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 pocket \
+    && useradd --uid 1000 --gid pocket --create-home --shell /usr/sbin/nologin pocket \
+    && mkdir -p /home/pocket/.cache/pocket_tts /home/pocket/.cache/huggingface \
+    && chown -R pocket:pocket /home/pocket/.cache
+
 # Use the CPU PyTorch wheels; the default Linux wheel set also downloads CUDA.
 RUN pip install --no-cache-dir pocket-tts==3.3.0 --extra-index-url https://download.pytorch.org/whl/cpu
+
+COPY pocket-entrypoint.sh /usr/local/bin/pocket-entrypoint
+RUN chmod 0755 /usr/local/bin/pocket-entrypoint /home/pocket /home/pocket/.cache
+ENV HOME=/home/pocket XDG_CACHE_HOME=/home/pocket/.cache HF_HOME=/home/pocket/.cache/huggingface
+ENTRYPOINT ["/usr/local/bin/pocket-entrypoint"]
 
 EXPOSE 8000
 CMD ["pocket-tts", "serve", "--host", "0.0.0.0"]

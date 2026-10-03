@@ -15,6 +15,7 @@ import unicodedata
 import fitz
 
 from .config import UPLOAD_DIR
+from .pdfsafe import PDF_MAX_TEXT, PDF_MAX_WORDS, PdfLimitError, run_pdf
 
 _lock = threading.Lock()
 _cache: dict = {}        # (doc_id, page, text) -> {rects, words, ...}
@@ -165,27 +166,35 @@ def sentence_rects(doc_id: int, filename: str, page_no: int, text: str) -> dict:
 
     result = {"page": page_no, "width": 0.0, "height": 0.0, "rotation": 0, "rects": [], "words": []}
     try:
-        doc = fitz.open(str(UPLOAD_DIR / filename))
-        try:
-            page = doc.load_page(page_no - 1)
-            result["width"] = page.rect.width
-            result["height"] = page.rect.height
-            result["rotation"] = page.rotation
-            words = page.get_text("words")
-            rects, wbs = _match(words, text)
-            if not rects:  # fallback to a plain text search
-                r = page.search_for(" ".join(text.split()))
-                rects = [[x.x0, x.y0, x.x1, x.y1] for x in r[:24]] if r else []
-            result["rects"] = rects
-            result["words"] = wbs
-        finally:
-            doc.close()
+        result = run_pdf("rects", str(UPLOAD_DIR / filename), page_no=page_no, text=text)
     except Exception:
         pass
 
     with _lock:
         _cache[key] = result
+        if len(_cache) > 256:
+            _cache.pop(next(iter(_cache)))
     return result
+
+
+def _page_words(page):
+    words = page.get_text("words")
+    if len(words) > PDF_MAX_WORDS or sum(len(word[4]) for word in words) > PDF_MAX_TEXT:
+        raise PdfLimitError("PDF page contains too many words.")
+    return words
+
+
+def _sentence_rects_local(path: str, page_no: int, text: str) -> dict:
+    """Worker-only layout calculation, including text search and matching."""
+    with fitz.open(path) as doc:
+        page = doc.load_page(page_no - 1)
+        words = _page_words(page)
+        rects, wbs = _match(words, text)
+        if not rects:
+            r = page.search_for(" ".join(text.split()))
+            rects = [[x.x0, x.y0, x.x1, x.y1] for x in r[:24]] if r else []
+        return {"page": page_no, "width": page.rect.width, "height": page.rect.height,
+                "rotation": page.rotation, "rects": rects, "words": wbs}
 
 
 def _hit_map(doc_id: int, filename: str, page_no: int, sentences):
@@ -196,20 +205,28 @@ def _hit_map(doc_id: int, filename: str, page_no: int, sentences):
             return _hit_cache[key]
     entries = []
     try:
-        doc = fitz.open(str(UPLOAD_DIR / filename))
-        try:
-            page = doc.load_page(page_no - 1)
-            words = page.get_text("words")
-            for idx, text in sentences:
-                rects, _ = _match(words, text)
-                for r in rects:
-                    entries.append((r[0], r[1], r[2], r[3], idx))
-        finally:
-            doc.close()
+        entries = run_pdf("hits", str(UPLOAD_DIR / filename), page_no=page_no, sentences=list(sentences))
     except Exception:
         pass
     with _lock:
         _hit_cache[key] = entries
+        if len(_hit_cache) > 64:
+            _hit_cache.pop(next(iter(_hit_cache)))
+    return entries
+
+
+def _hit_map_local(path: str, page_no: int, sentences) -> list:
+    """Worker-only hit map; repeated-word matching shares the worker deadline."""
+    entries = []
+    with fitz.open(path) as doc:
+        page = doc.load_page(page_no - 1)
+        words = _page_words(page)
+        for idx, text in sentences:
+            rects, _ = _match(words, text)
+            for r in rects:
+                entries.append((r[0], r[1], r[2], r[3], idx))
+                if len(entries) > 5000:
+                    raise PdfLimitError("PDF page has too many sentence regions.")
     return entries
 
 

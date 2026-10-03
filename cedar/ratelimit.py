@@ -24,24 +24,32 @@ class SlidingWindow:
         self.max_keys = max_keys
         self._log: dict[str, deque] = {}
 
-    def _q(self, key: str, now: float) -> deque:
-        q = self._log.setdefault(key, deque())
+    def _q(self, key: str, now: float) -> deque | None:
+        if key not in self._log:
+            if len(self._log) >= self.max_keys:
+                for k in [k for k, v in self._log.items()
+                          if not v or now - v[-1] > self.window_s]:
+                    self._log.pop(k, None)
+            # Fail closed when every slot is active. Evicting an active peer
+            # would let a flood reset that peer's wrong-key throttle.
+            if len(self._log) >= self.max_keys:
+                return None
+            self._log[key] = deque()
+        q = self._log[key]
         while q and now - q[0] > self.window_s:
             q.popleft()
         return q
 
     def check(self, key: str) -> bool:
         """True while `key` is under the limit. Records nothing."""
-        return len(self._q(key, time.time())) < self.limit
+        q = self._q(key, time.monotonic())
+        return q is not None and len(q) < self.limit
 
     def hit(self, key: str) -> None:
         """Record one event against `key`."""
-        now = time.time()
-        self._q(key, now).append(now)
-        if len(self._log) > self.max_keys:  # bound memory: drop idle keys
-            for k in [k for k, v in self._log.items()
-                      if not v or now - v[-1] > self.window_s]:
-                self._log.pop(k, None)
+        q = self._q(key, time.monotonic())
+        if q is not None and len(q) < self.limit:
+            q.append(time.monotonic())
 
     def allow(self, key: str) -> bool:
         """check + hit in one step, for events counted win or lose."""

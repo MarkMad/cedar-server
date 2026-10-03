@@ -14,10 +14,17 @@ services:
       OMP_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
     volumes:
-      - pocket-cache:/root/.cache/pocket_tts
-      - pocket-hf-cache:/root/.cache/huggingface
+      - pocket-cache:/home/pocket/.cache/pocket_tts
+      - pocket-hf-cache:/home/pocket/.cache/huggingface
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - SETPCAP
 
   cedar:
     environment:
