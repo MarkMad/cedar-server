@@ -80,6 +80,11 @@ TTS_CONCURRENCY = int(os.environ.get("CEDAR_TTS_CONCURRENCY", "1"))
 if TTS_CONCURRENCY < 1:
     raise ValueError("CEDAR_TTS_CONCURRENCY must be at least 1")
 
+# Warm only the next few document sentences, sharing the demand synthesis pool.
+TTS_LOOKAHEAD = int(os.environ.get("CEDAR_TTS_LOOKAHEAD", "3"))
+if not 0 <= TTS_LOOKAHEAD <= 10:
+    raise ValueError("CEDAR_TTS_LOOKAHEAD must be between 0 and 10")
+
 # Largest accepted PDF/EPUB upload. An uploaded file is held in memory (and a PDF
 # is then written to UPLOAD_DIR), so this bounds what one request can cost.
 MAX_UPLOAD_BYTES = int(os.environ.get("CEDAR_MAX_UPLOAD_MB", "100")) * 1024 * 1024

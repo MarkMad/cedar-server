@@ -14,6 +14,7 @@ _TMP = tempfile.mkdtemp(prefix="cedar-test-")
 os.environ["CEDAR_DATA"] = _TMP
 os.environ["CEDAR_KEY"] = "test-owner-key-0123456"
 os.environ["CEDAR_KOKORO_URL"] = "http://kokoro.invalid:8880"
+os.environ["CEDAR_TTS_LOOKAHEAD"] = "0"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

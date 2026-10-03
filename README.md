@@ -250,6 +250,7 @@ All optional; set them in `.env` (compose reads it) or the environment.
 | `CEDAR_DATA` | `/data` in the container | Where the database, uploads and audio cache live. |
 | `CEDAR_KOKORO_URL` | `http://kokoro:8880` | The voice engine. |
 | `CEDAR_TTS_CONCURRENCY` | `1` | Maximum simultaneous uncached speech jobs per server process. Increase for GPU hosts if useful. |
+| `CEDAR_TTS_LOOKAHEAD` | `3` | Upcoming sentences to warm into the audio cache after a document speech request (0–10); `0` disables look-ahead. |
 | `CEDAR_KOKORO_CPUS` | `0` | Kokoro CPU-time budget (compose only); `0` is unlimited. Try `3` on a four-core server. |
 | `CEDAR_DEFAULT_VOICE` | `af_heart` | Voice for English until you pick one. |
 | `CEDAR_AUDIO_BITRATE_KBPS` | `64` | Bitrate of the mp3 sent to the app. Keep ≥ 64 (see `cedar/config.py` for why). |
@@ -267,6 +268,23 @@ CPU capacity for DietPi and other services, then apply with
 fresh audio stays ahead of playback before reducing it further. The speech
 model still needs substantial CPU for new audio; existing cached sentences
 need no inference. Keep the audio cache volume when recreating containers.
+
+Document narration also warms the next three sentences into the disk cache.
+This bounded look-ahead requires no app update and gives synthesis a head start
+while a returned clip plays. Requested audio takes priority over queued
+background work; already-running synthesis finishes so its result can be reused.
+Set `CEDAR_TTS_LOOKAHEAD=0` to disable it. The cache is on the server, so network
+delivery and the app's own playback buffering still matter. Look-ahead cannot
+prevent sustained pauses if generation is slower than your playback rate.
+
+New synthesis jobs log timing under `cedar.tts` in `docker compose logs cedar`
+and `/data/logs/cedar.log`. `queue_s` is the wait for a synthesis slot;
+`synth_s` includes Kokoro requests, and `processing_s` covers encoding and other
+processing. `audio_s` is the clip duration. `rtf` is generation/processing time
+divided by audio duration, excluding queue time: below `1` is faster than normal
+playback; at 2× playback it must stay below `0.5` to keep up. `source=lookahead`
+identifies background generation. Timing lines identify clips by a hash rather
+than logging their text.
 
 A few server-side knobs can also be changed at runtime with the key:
 

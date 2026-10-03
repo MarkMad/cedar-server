@@ -31,6 +31,7 @@ services:
       CEDAR_DATA: /data
       CEDAR_KOKORO_URL: http://kokoro:8880
       CEDAR_TTS_CONCURRENCY: ${CEDAR_TTS_CONCURRENCY:-1}
+      CEDAR_TTS_LOOKAHEAD: ${CEDAR_TTS_LOOKAHEAD:-3}
       # Optional. Leave unset and a key is generated on first start (see logs).
       CEDAR_KEY: ${CEDAR_KEY:-}
       CEDAR_SERVER_NAME: ${CEDAR_SERVER_NAME:-My Cedar server}
