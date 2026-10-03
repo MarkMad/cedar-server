@@ -1,4 +1,5 @@
 from conftest import AUTH
+from cedar import tts
 
 # Long enough for the detector to be sure: it refuses to guess on a few words,
 # and an unplaced document follows the last voice picked, whatever language.
@@ -75,12 +76,15 @@ def test_server_knobs(client):
     assert client.get("/api/settings/server", headers=AUTH).json()["catalog_full"] is False
 
 
-def test_voices_and_live(client):
+def test_voices_and_live(client, monkeypatch):
+    warmed = []
+    monkeypatch.setattr(tts, "prefetch_live_page", lambda voice, texts: warmed.append((voice, texts)))
     v = client.get("/api/voices", headers=AUTH).json()
     assert "af_heart" in v["voices"] and v["defaults"]["en"]
     page = client.post("/api/live/sentences", headers=AUTH,
                        json={"text": SPANISH}).json()
     assert page["lang"] == "es" and page["voice"] == "ef_dora" and len(page["sentences"]) >= 2
+    assert warmed == [(page["voice"], page["sentences"])]
     clip = client.post("/api/live/tts", headers=AUTH,
                        json={"text": page["sentences"][0], "voice": page["voice"]}).json()
     assert clip["format"] == "mp3"

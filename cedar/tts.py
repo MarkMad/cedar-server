@@ -838,6 +838,17 @@ def prefetch_document(doc_id: int, voice: str, token: object, texts: List[str]) 
     _dispatch()
 
 
+def prefetch_live_page(voice: str, texts: List[str]) -> None:
+    """Warm the first live-reading clips while the client displays the page."""
+    if not TTS_LOOKAHEAD or not texts:
+        return
+    # Document ids are positive, so -1 is a separate window for the latest
+    # captured page. A new page discards stale queued work but keeps an active
+    # inference cacheable, using the same bounded scheduler as documents.
+    token = begin_document_request(-1, voice)
+    prefetch_document(-1, voice, token, texts)
+
+
 async def shutdown_synthesis() -> None:
     """Release queued jobs and join active tasks before the app loop closes."""
     global _closing

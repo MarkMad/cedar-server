@@ -47,6 +47,36 @@ def test_prefetch_is_serial_and_cached_audio_bypasses_queue(monkeypatch):
     asyncio.run(run())
 
 
+def test_live_page_starts_next_clips_before_playback_requests_them(monkeypatch):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        cache = {}
+        monkeypatch.setattr(tts, "_read_cache", lambda key: cache.get(key))
+
+        async def synth(key, text, voice):
+            calls.append(text)
+            started.set()
+            await release.wait()
+            result = {"audio_b64": text, "duration": 1.0}
+            cache[key] = result
+            return result
+
+        monkeypatch.setattr(tts, "_synth_uncached", synth)
+        tts.prefetch_live_page("af_pocket_alba", ["First line", "Second line", "Third line"])
+        await asyncio.wait_for(started.wait(), 2)
+        assert calls == ["First line"]
+        assert len(tts._speculative) == 2
+
+        release.set()
+        await _wait_until(lambda: not tts._inflight)
+        assert calls == ["First line", "Second line", "Third line"]
+        assert (await _synthesize("First line", "af_pocket_alba"))["audio_b64"] == "First line"
+        assert calls == ["First line", "Second line", "Third line"]
+
+    asyncio.run(run())
+
+
 def test_disconnected_caller_does_not_cancel_shared_synthesis(monkeypatch):
     async def run():
         cache = {}
