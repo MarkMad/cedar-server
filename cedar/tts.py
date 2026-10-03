@@ -42,7 +42,7 @@ from typing import Dict, List, Optional, Tuple
 import httpx
 
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_DIR, AUDIO_FORMAT,
-                     AUDIO_SOURCE_FORMAT, KOKORO_URL, TTS_TIMEOUT)
+                     AUDIO_SOURCE_FORMAT, KOKORO_URL, TTS_CONCURRENCY, TTS_TIMEOUT)
 
 _CACHE = AUDIO_DIR / "cache"
 _CACHE.mkdir(parents=True, exist_ok=True)
@@ -704,6 +704,24 @@ _client = httpx.AsyncClient(
 # task are independent of it: a disconnected request doesn't cancel the
 # synthesis, and the result still lands in the disk cache.
 _inflight: Dict[str, "asyncio.Task[dict]"] = {}
+_synth_slots = asyncio.Semaphore(TTS_CONCURRENCY)
+
+
+async def _synth_queued(key: str, text: str, voice: str) -> dict:
+    # Cache hits never wait behind neural synthesis or encoding.
+    async with _synth_slots:
+        cached = await asyncio.to_thread(_read_cache, key)
+        if cached is not None:
+            return cached
+        return await _synth_uncached(key, text, voice)
+
+
+def _synth_done(key: str, task: asyncio.Task) -> None:
+    _inflight.pop(key, None)
+    # All callers may have disconnected. Retrieve the exception so a failed
+    # background job does not produce an unhandled-task warning.
+    if not task.cancelled():
+        task.exception()
 
 
 def _read_cache(key: str) -> Optional[dict]:
@@ -920,11 +938,11 @@ async def synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
 
     task = _inflight.get(key)
     if task is None:
-        task = asyncio.create_task(_synth_uncached(key, text, voice))
+        task = asyncio.create_task(_synth_queued(key, text, voice))
         _inflight[key] = task
-        task.add_done_callback(lambda _t: _inflight.pop(key, None))
+        task.add_done_callback(lambda done: _synth_done(key, done))
     # Shallow copy: coalesced callers share the payload but not the dict.
-    return _client_payload(dict(await task))
+    return _client_payload(dict(await asyncio.shield(task)))
 
 
 def _client_payload(meta: dict) -> dict:

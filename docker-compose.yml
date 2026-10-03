@@ -14,6 +14,8 @@
 services:
   kokoro:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.6.0
+    # Optional CPU-time budget (0 = unlimited). On a four-core N5105, try 3.
+    cpus: ${CEDAR_KOKORO_CPUS:-0}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -28,6 +30,7 @@ services:
     environment:
       CEDAR_DATA: /data
       CEDAR_KOKORO_URL: http://kokoro:8880
+      CEDAR_TTS_CONCURRENCY: ${CEDAR_TTS_CONCURRENCY:-1}
       # Optional. Leave unset and a key is generated on first start (see logs).
       CEDAR_KEY: ${CEDAR_KEY:-}
       CEDAR_SERVER_NAME: ${CEDAR_SERVER_NAME:-My Cedar server}
