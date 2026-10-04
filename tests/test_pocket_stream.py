@@ -58,7 +58,8 @@ def backend(monkeypatch, source, status=200):
         calls.append(request)
         return httpx.Response(status, stream=source)
 
-    monkeypatch.setattr(tts, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(tts, "_new_synthesis_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     return calls
 
 
@@ -95,7 +96,6 @@ def test_valid_wav_and_end_totals(monkeypatch, declared):
         assert calls[0].url == "http://pocket.invalid/tts"
         assert calls[0].content == b"text=Hello+there&voice_url=alba"
         assert source.closed and not tts._active
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -113,7 +113,6 @@ def test_audio_arrives_before_upstream_end(monkeypatch, caplog):
         gate.set()
         rest = [json.loads(frame) async for frame in stream]
         assert rest[-1]["type"] == "end"
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -133,7 +132,6 @@ def test_malformed_and_truncated_wav_never_end(monkeypatch, bad):
         assert frames[-1] == {"type": "error", "code": "voice_service_failed"}
         assert all(f["type"] != "end" for f in frames)
         assert source.closed and not tts._active
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -151,7 +149,6 @@ def test_upstream_http_and_transport_failures_are_sanitized(monkeypatch):
             assert all(f["type"] != "end" for f in frames)
             assert "Secret" not in json.dumps(frames)
             assert source.closed and not tts._active
-            await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -160,7 +157,6 @@ def test_output_limit_and_absolute_deadline(monkeypatch):
         monkeypatch.setattr(pocket_stream, "MAX_PCM_BYTES", 8)
         backend(monkeypatch, Source([wav()]))
         assert (await collect())[-1]["type"] == "error"
-        await tts._client.aclose()
         monkeypatch.setattr(pocket_stream, "MAX_PCM_BYTES", 14_400_000)
         monkeypatch.setattr(tts, "TTS_TIMEOUT", 0.05)
         source = Source([wav(declared=2_000_000_000)], asyncio.Event())
@@ -168,7 +164,6 @@ def test_output_limit_and_absolute_deadline(monkeypatch):
         frames = await collect()
         assert frames[-1]["type"] == "error"
         assert source.closed and not tts._active
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -185,13 +180,11 @@ def test_slow_consumer_backpressure_expires_and_releases_slot(monkeypatch):
         rest = [json.loads(frame) async for frame in stream]
         assert len(rest) <= 3  # At most two audio frames plus the terminal error.
         assert rest[-1]["type"] == "error"
-        await tts._client.aclose()
     asyncio.run(run())
 
 
 def test_queue_deadline_expires_without_starting_upstream(monkeypatch):
     async def run():
-        monkeypatch.setattr(tts, "TTS_TIMEOUT", 0.05)
         started, release = asyncio.Event(), asyncio.Event()
 
         async def synth(key, text, voice):
@@ -203,13 +196,13 @@ def test_queue_deadline_expires_without_starting_upstream(monkeypatch):
         calls = backend(monkeypatch, Source([wav()]))
         normal = asyncio.create_task(_synthesize("Normal", "af_heart"))
         await started.wait()
+        monkeypatch.setattr(tts, "TTS_TIMEOUT", 0.05)
         frames = await collect()
         assert frames == [{"type": "error", "code": "voice_service_failed"}]
         assert not calls and not tts._demand and len(tts._active) == 1
         release.set()
         await normal
         assert not tts._active
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -258,7 +251,6 @@ def test_stream_waits_for_normal_job_and_precedes_speculation(monkeypatch):
         assert (await streaming)[-1]["type"] == "end"
         await until(lambda: not tts._active)
         assert calls and order == ["Normal", "Speculative"]
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -282,7 +274,6 @@ def test_normal_waits_for_stream_and_cancel_releases_slot(monkeypatch):
         await stream.aclose()
         await normal
         assert source.closed and calls == ["Normal"] and not tts._active
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -308,7 +299,6 @@ def test_cancel_queued_stream_does_not_start_upstream(monkeypatch):
         release.set()
         await normal
         assert not tts._active
-        await tts._client.aclose()
     asyncio.run(run())
 
 
@@ -348,7 +338,6 @@ def test_asgi_disconnect_closes_upstream_and_releases_slot(monkeypatch):
         assert source.closed and any(f["type"] == "audio" for f in frames)
         assert all(f["type"] != "end" for f in frames)
         assert not tts._demand
-        await tts._client.aclose()
     asyncio.run(run())
 
 

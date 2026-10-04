@@ -40,9 +40,11 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import anyio
 import httpx
 
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_DIR, AUDIO_FORMAT,
@@ -710,12 +712,51 @@ def _align_words(text: str, words: List[dict]) -> List[dict]:
     return entries
 
 
-# One client for all synthesis calls: keep-alive connections to Kokoro instead
-# of a new pool + TCP handshake per chunk.
-_client = httpx.AsyncClient(
-    timeout=TTS_TIMEOUT,
-    limits=httpx.Limits(max_connections=32, max_keepalive_connections=8),
-)
+# Synthesis is already bounded by the scheduler. A private pool per upstream
+# call prevents abandoned/stale pooled requests from blocking later jobs.
+# These engines run on the local network, so one connection setup is small
+# compared with inference; no transport retry can duplicate a streamed clip.
+_TRANSPORT_CLOSE_TIMEOUT = 5.0
+_transport_closers: set[asyncio.Task] = set()
+
+
+def _new_synthesis_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(TTS_TIMEOUT, pool=min(1.0, TTS_TIMEOUT)),
+        limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+    )
+
+
+async def _close_synthesis_client(client: httpx.AsyncClient) -> None:
+    try:
+        async with asyncio.timeout(_TRANSPORT_CLOSE_TIMEOUT):
+            await client.aclose()
+    except Exception as exc:
+        log.warning("tts transport cleanup failed error=%s", type(exc).__name__)
+
+
+@asynccontextmanager
+async def _synthesis_client() -> AsyncIterator[httpx.AsyncClient]:
+    """Close the whole private pool even if response cleanup is interrupted."""
+    client = _new_synthesis_client()
+    try:
+        yield client
+    finally:
+        close = asyncio.create_task(_close_synthesis_client(client))
+        _transport_closers.add(close)
+        close.add_done_callback(_transport_closers.discard)
+        interrupted = False
+        # AnyIO shielding handles ASGI cancellation scopes; asyncio.shield
+        # also prevents repeated native task.cancel() from killing the closer.
+        with anyio.CancelScope(shield=True):
+            while not close.done():
+                try:
+                    await asyncio.shield(close)
+                except asyncio.CancelledError:
+                    interrupted = True
+        close.result()
+        if interrupted:
+            raise asyncio.CancelledError
 
 # In-flight synthesis per cache key. Concurrent requests for the same uncached
 # chunk await one task instead of each hitting Kokoro. Callers awaiting the
@@ -796,8 +837,8 @@ async def _run_stream_job(job: _StreamJob) -> None:
         if remaining <= 0:
             raise TimeoutError("Stream expired in queue")
         async with asyncio.timeout(remaining):
-            async with _client.stream("POST", f"{POCKET_URL}/tts", data={
-                "text": job.text, "voice_url": _POCKET_VOICES[job.voice],
+            async with _synthesis_client() as client, client.stream("POST", f"{POCKET_URL}/tts", data={
+                    "text": job.text, "voice_url": _POCKET_VOICES[job.voice],
             }) as response:
                 response.raise_for_status()
                 # ~43 ms of PCM per upstream read avoids waiting for a large
@@ -886,8 +927,11 @@ async def _run_job(job: _SynthesisJob) -> None:
     started = time.monotonic()
     source = "demand" if job.foreground else "lookahead"
     try:
-        cached = await asyncio.to_thread(_read_cache, job.key)
-        result = cached if cached is not None else await _synth_uncached(job.key, job.text, job.voice)
+        # Bound the whole active job, including format fallback and encoding.
+        # Per-read HTTP timeouts alone allow a trickling response to run forever.
+        async with asyncio.timeout(TTS_TIMEOUT):
+            cached = await asyncio.to_thread(_read_cache, job.key)
+            result = cached if cached is not None else await _synth_uncached(job.key, job.text, job.voice)
         elapsed = time.monotonic() - started
         synth_s, processing_s = result.pop("_timing", (0.0, elapsed))
         duration = float(result.get("duration", 0))
@@ -980,6 +1024,9 @@ async def shutdown_synthesis() -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # A caller's repeated cancellation can leave an independent bounded
+        # pool closer finishing. Join it before the application's loop closes.
+        await asyncio.gather(*list(_transport_closers), return_exceptions=True)
         _active.clear()
         _inflight.clear()
         _windows.clear()
@@ -1086,9 +1133,10 @@ async def _ask_kokoro(text: str, voice: str, fmt: str) -> tuple[bytes, List[dict
         "response_format": fmt,
         "stream": False,
     }
-    resp = await _client.post(f"{KOKORO_URL}/dev/captioned_speech", json=payload)
-    resp.raise_for_status()
-    data = resp.json()
+    async with _synthesis_client() as client:
+        resp = await client.post(f"{KOKORO_URL}/dev/captioned_speech", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
     audio_b64 = data.get("audio") or ""
     return (base64.b64decode(audio_b64) if audio_b64 else b"",
             data.get("timestamps") or [])
@@ -1096,13 +1144,14 @@ async def _ask_kokoro(text: str, voice: str, fmt: str) -> tuple[bytes, List[dict
 
 async def _ask_pocket(text: str, voice: str) -> bytes:
     """Pocket's official server accepts form fields and returns a WAV stream."""
-    resp = await _client.post(f"{POCKET_URL}/tts", data={
-        "text": text, "voice_url": _POCKET_VOICES[voice],
-    })
-    resp.raise_for_status()
-    if not resp.content:
-        raise ValueError("Pocket TTS returned empty audio")
-    return resp.content
+    async with _synthesis_client() as client:
+        resp = await client.post(f"{POCKET_URL}/tts", data={
+            "text": text, "voice_url": _POCKET_VOICES[voice],
+        })
+        resp.raise_for_status()
+        if not resp.content:
+            raise ValueError("Pocket TTS returned empty audio")
+        return resp.content
 
 
 async def _synth_pocket(key: str, text: str, voice: str) -> dict:
@@ -1142,7 +1191,7 @@ async def _synth_uncached(key: str, text: str, voice: str) -> dict:
 
     try:
         audio, raw_words = await ask(want)
-    except httpx.HTTPError as exc:
+    except httpx.HTTPStatusError as exc:
         # Asking for the intermediate format is the one new way this call can
         # fail that the old code could not: self-hosters track a floating
         # kokoro-fastapi tag, and a build that rejects wav on
