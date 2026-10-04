@@ -12,6 +12,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import lang, settings, tts
@@ -33,6 +34,17 @@ class PageIn(BaseModel):
 class SpeakIn(BaseModel):
     text: str
     voice: str | None = None
+
+
+def _sentence_text(body: SpeakIn) -> str:
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Nothing to say.")
+    if len(text) > _MAX_SENTENCE_CHARS:
+        raise HTTPException(413, "That is more than one sentence.")
+    if body.voice is not None and not tts.valid_voice_id(body.voice):
+        raise HTTPException(400, "Unknown voice.")
+    return text
 
 
 @router.post("/sentences")
@@ -62,13 +74,7 @@ async def sentences(body: PageIn):
 async def speak(body: SpeakIn):
     """One sentence → {format, audio_b64, words, duration}, same shape as a
     document's /tts so the client's player needs no special case."""
-    text = (body.text or "").strip()
-    if not text:
-        raise HTTPException(400, "Nothing to say.")
-    if len(text) > _MAX_SENTENCE_CHARS:
-        raise HTTPException(413, "That is more than one sentence.")
-    if body.voice is not None and not tts.valid_voice_id(body.voice):
-        raise HTTPException(400, "Unknown voice.")
+    text = _sentence_text(body)
     main, _ = settings.reading_defaults()
     try:
         return await tts.synthesize(text, body.voice or main)
@@ -77,3 +83,15 @@ async def speak(body: SpeakIn):
         # the server log and give the client only the fact.
         log.exception("live tts failed")
         raise HTTPException(502, "The voice service could not read that sentence.")
+
+
+@router.post("/tts/stream")
+async def speak_stream(body: SpeakIn):
+    """Opt-in Pocket PCM stream, with explicit end/error NDJSON frames."""
+    text = _sentence_text(body)
+    if not tts.is_pocket_voice(body.voice):
+        raise HTTPException(400, "Choose an explicit Pocket voice for streaming.")
+    if not tts.pocket_streaming_available(body.voice):
+        raise HTTPException(503, "Pocket streaming is not configured.")
+    return StreamingResponse(tts.stream_pocket(text, body.voice), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

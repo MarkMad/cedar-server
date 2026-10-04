@@ -484,8 +484,84 @@ the status page at `/`) is open.
 | `POST /live/sentences` · `POST /live/tts` | read text the app already has on screen |
 
 `/tts` returns `{format, audio_b64, words:[{start,end,cs,ce}], duration}`.
-Audio is always synthesized at 1.0× and cached on disk by (text, voice); the
-app changes tempo with its player's playback rate so word timestamps stay valid.
+
+### Optional Pocket stream for Android clients
+
+`POST /api/live/tts/stream` lets an updated client start playing Pocket audio
+before inference finishes. This is Cedar's own protocol, not an OpenAI-compatible
+endpoint. `/api/live/tts` keeps its existing complete MP3 response and word map.
+Use the usual `Authorization: Bearer <owner-key>` (or `X-Cedar-Key`) and JSON:
+
+```json
+{"text":"Hello there.","voice":"af_pocket_alba"}
+```
+
+`text` is trimmed, must be nonempty, and may contain at most 2,000 characters.
+The voice must be explicit: `af_pocket_alba`, `af_pocket_anna`,
+`am_pocket_marius`, or `am_pocket_jean`. There is no default-voice selection or
+automatic engine fallback. Invalid text/voice returns 400, oversized text 413,
+and a server without `CEDAR_POCKET_URL` returns 503, before streaming begins.
+
+A valid request returns HTTP 200 with `Content-Type: application/x-ndjson`,
+`Cache-Control: no-store`, and `X-Accel-Buffering: no`. Read UTF-8 JSON one line
+at a time; HTTP/network chunks are not message boundaries. Each line ends in
+`\n`, and every line is smaller than 12 KiB. A successful response follows:
+
+```json
+{"type":"metadata","version":1,"format":"pcm_s16le","sample_rate":24000,"channels":1,"voice":"af_pocket_alba"}
+{"type":"audio","seq":0,"sample_offset":0,"audio_b64":"AQABAA=="}
+{"type":"end","audio_frames":1,"pcm_bytes":4,"samples":2,"duration":0.00008333333333333333}
+```
+
+The audio is raw signed 16-bit little-endian PCM, 24,000 samples/second, mono;
+there is no WAV/MP3 header in the decoded bytes. Each `audio_b64` decodes to a
+nonempty, even number of bytes, at most 8,192. `seq` starts at zero and increases
+by one; `sample_offset` is the number of preceding decoded bytes divided by two.
+The end frame reports the total audio-frame count, decoded PCM bytes, sample
+count, and duration in seconds (`pcm_bytes / 48000`). Pocket's streaming WAV
+headers use placeholder lengths; Cedar validates the audio format and strips
+the header while forwarding bounded PCM pieces. It validates finite declared
+lengths and sample alignment, but clean upstream completion of a placeholder
+WAV cannot prove that the engine spoke every word of the supplied text.
+
+After HTTP 200, upstream errors, malformed/truncated WAV, output-limit failures,
+or deadline expiry terminate with this frame instead of `end`:
+
+```json
+{"type":"error","code":"voice_service_failed"}
+```
+
+An error may arrive before metadata or after some audio. The Android client must
+require metadata version 1 before audio, validate sequence/offsets, and count
+decoded frames/bytes/samples. Only one `end` with matching totals means transfer
+success. EOF without `end`, partial/invalid JSON, an `error`, inconsistent totals,
+or anything following a terminal frame means failure. Stop the player and
+discard buffered audio on failure; do not automatically replay a sentence via
+the MP3 endpoint after partial playback. Closing the HTTP call cancels queued
+or active streaming inference. An Android `TextToSpeechService` should call
+`SynthesisCallback.start(24000, AudioFormat.ENCODING_PCM_16BIT, 1)` after validated
+metadata, then pass decoded PCM to `audioAvailable()` in pieces no larger than
+`getMaxBufferSize()`, respecting sample boundaries and callback return codes.
+Call `done()` only after a verified `end`; call `error()` on failure. Decode and
+deliver frames on the synthesis worker with bounded buffering; cancel the
+network call on stop, seek, or voice change. A standalone player may instead use
+24 kHz mono PCM16 `AudioTrack` in `MODE_STREAM`. Apply playback speed locally.
+
+Streaming supplies no word timestamps, estimated highlighting, or disk-cache
+entry. It uses the same `CEDAR_TTS_CONCURRENCY` slots and foreground FIFO queue
+as complete speech requests, ahead of pending lookahead work. The absolute
+`CEDAR_TTS_TIMEOUT` deadline includes queue wait, upstream reads, and server
+backpressure (default 120 seconds). Each stream buffers at most two outgoing
+frames, accepts at most 64 KiB of WAV headers and 14,400,000 PCM bytes (five
+minutes), and releases its slot on completion, error, timeout, or disconnect.
+First-audio timing is logged as `tts stream first_audio` with `queue_s` and
+`first_pcm_s`; metadata receipt alone does not measure first playable audio.
+PCM plus base64 uses more bandwidth than the existing MP3 response. Reverse
+proxies must pass through streaming bodies without buffering to retain the
+latency benefit. Pocket model quantization and the Compose settings are unchanged.
+For the complete MP3 endpoints, audio is synthesized at 1.0× and cached on disk
+by (text, voice); the app changes tempo with its player's playback rate so word
+timestamps stay valid.
 
 ## Development
 
