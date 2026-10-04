@@ -22,7 +22,10 @@ jobs:
         continue-on-error: true
 
   docker:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t cedar-server:ci .

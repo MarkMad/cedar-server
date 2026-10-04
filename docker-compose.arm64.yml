@@ -1,0 +1,14 @@
+# Native ARM64 deployment for Snapdragon / Windows on Arm with WSL 2.
+# docker compose -f docker-compose.yml -f docker-compose.arm64.yml up -d --build
+# CPU inference; do not combine with the NVIDIA GPU override.
+services:
+  kokoro:
+    platform: linux/arm64
+
+  cedar:
+    platform: linux/arm64
+    image: cedar-server:arm64
+
+  classics:
+    platform: linux/arm64
+    image: cedar-classics:arm64

@@ -43,6 +43,9 @@ reading positions, bookmarks and highlights.
 
 ## Install
 
+**Snapdragon / Windows on Arm:** use the [WSL 2 and native ARM64 guide](docs/windows-arm64.md).
+The ARM64 Compose profile runs Cedar and Kokoro on the CPU without x86 emulation.
+
 A few minutes, most of it download time. You need
 [Docker](https://docs.docker.com/get-docker/) and a machine that stays on — a
 Mac with Apple Silicon, a Linux box, a NAS that runs containers. A GPU is
