@@ -37,7 +37,9 @@ import re
 import subprocess
 import tempfile
 import time
+import uuid
 from collections import OrderedDict
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -46,6 +48,7 @@ import httpx
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_DIR, AUDIO_FORMAT,
                      AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_URL, TTS_CONCURRENCY,
                      TTS_LOOKAHEAD, TTS_TIMEOUT)
+from .pocket_stream import wav_pcm
 
 _CACHE = AUDIO_DIR / "cache"
 _CACHE.mkdir(parents=True, exist_ok=True)
@@ -734,7 +737,17 @@ class _SynthesisJob:
     owners: set[tuple[int, str]] = field(default_factory=set)
 
 
-_demand: OrderedDict[str, _SynthesisJob] = OrderedDict()
+@dataclass
+class _StreamJob:
+    key: str
+    text: str
+    voice: str
+    future: asyncio.Future
+    queue: asyncio.Queue
+    queued_at: float = field(default_factory=time.monotonic)
+
+
+_demand: OrderedDict[str, _SynthesisJob | _StreamJob] = OrderedDict()
 _speculative: OrderedDict[str, _SynthesisJob] = OrderedDict()
 _active: Dict[str, asyncio.Task] = {}
 _windows: OrderedDict[tuple[int, str], object] = OrderedDict()
@@ -760,7 +773,112 @@ def _dispatch() -> None:
     while not _closing and len(_active) < TTS_CONCURRENCY and (_demand or _speculative):
         queue = _demand if _demand else _speculative
         key, job = queue.popitem(last=False)
-        _active[key] = asyncio.create_task(_run_job(job))
+        runner = _run_stream_job if isinstance(job, _StreamJob) else _run_job
+        _active[key] = asyncio.create_task(runner(job))
+
+
+def is_pocket_voice(voice: str | None) -> bool:
+    return voice in _POCKET_VOICES
+
+
+def pocket_streaming_available(voice: str | None) -> bool:
+    return bool(POCKET_URL) and is_pocket_voice(voice)
+
+
+async def _run_stream_job(job: _StreamJob) -> None:
+    """Own one shared inference slot, with bounded backpressure and lifetime."""
+    started = time.monotonic()
+    total, frames, first_pcm_s = 0, 0, None
+    try:
+        # Includes queue wait and slow consumers, rather than resetting on each
+        # upstream read. httpx's ordinary timeout alone permits endless trickles.
+        remaining = TTS_TIMEOUT - (started - job.queued_at)
+        if remaining <= 0:
+            raise TimeoutError("Stream expired in queue")
+        async with asyncio.timeout(remaining):
+            async with _client.stream("POST", f"{POCKET_URL}/tts", data={
+                "text": job.text, "voice_url": _POCKET_VOICES[job.voice],
+            }) as response:
+                response.raise_for_status()
+                # ~43 ms of PCM per upstream read avoids waiting for a large
+                # network buffer before forwarding the first playable samples.
+                async for pcm in wav_pcm(response.aiter_bytes(chunk_size=2048)):
+                    if pcm is None:
+                        await job.queue.put({"type": "metadata", "version": 1,
+                                             "format": "pcm_s16le", "sample_rate": 24_000,
+                                             "channels": 1, "voice": job.voice})
+                        continue
+                    if first_pcm_s is None:
+                        first_pcm_s = time.monotonic() - started
+                        log.info("tts stream first_audio queue_s=%.3f first_pcm_s=%.3f",
+                                 started - job.queued_at, first_pcm_s)
+                    await job.queue.put({"type": "audio", "seq": frames, "sample_offset": total // 2,
+                                         "audio_b64": base64.b64encode(pcm).decode("ascii")})
+                    frames += 1
+                    total += len(pcm)
+        job.future.set_result({"type": "end", "audio_frames": frames, "pcm_bytes": total,
+                               "samples": total // 2, "duration": total / 48_000})
+        log.info("tts stream completed queue_s=%.3f elapsed_s=%.3f pcm_bytes=%d",
+                 started - job.queued_at, time.monotonic() - started, total)
+    except asyncio.CancelledError:
+        job.future.cancel()
+        raise
+    except Exception as exc:
+        # No service URL, supplied text, or upstream response body on the wire.
+        log.warning("tts stream failed elapsed_s=%.3f error=%s",
+                    time.monotonic() - started, type(exc).__name__)
+        job.future.set_result({"type": "error", "code": "voice_service_failed"})
+    finally:
+        _active.pop(job.key, None)
+        _dispatch()
+
+
+async def stream_pocket(text: str, voice: str) -> AsyncIterator[bytes]:
+    """Foreground PCM stream; closing it cancels only its own upstream job."""
+    future = asyncio.get_running_loop().create_future()
+    job = _StreamJob("stream:" + uuid.uuid4().hex, text, voice, future, asyncio.Queue(maxsize=2))
+    if _closing:
+        yield b'{"type":"error","code":"voice_service_failed"}\n'
+        return
+    _demand[job.key] = job
+    _dispatch()
+    deadline = job.queued_at + TTS_TIMEOUT
+    try:
+        while True:
+            try:
+                frame = job.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                if future.done():
+                    terminal = future.result()
+                    break
+                read = asyncio.create_task(job.queue.get())
+                try:
+                    done, _ = await asyncio.wait({read, future}, timeout=max(0.0, deadline - time.monotonic()),
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                    if not done:
+                        terminal = {"type": "error", "code": "voice_service_failed"}
+                        break
+                    if read not in done:
+                        continue
+                    frame = read.result()
+                finally:
+                    if not read.done():
+                        read.cancel()
+                    await asyncio.gather(read, return_exceptions=True)
+            yield (json.dumps(frame, separators=(",", ":")) + "\n").encode()
+    finally:
+        _demand.pop(job.key, None)
+        task = _active.get(job.key)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            # A task cancelled before its coroutine first runs never enters
+            # the producer's finally block, so the caller releases that slot.
+            _active.pop(job.key, None)
+        if not future.done():
+            future.cancel()
+        _dispatch()
+    yield (json.dumps(terminal, separators=(",", ":")) + "\n").encode()
 
 
 async def _run_job(job: _SynthesisJob) -> None:
