@@ -15,12 +15,18 @@ def test_pocket_audio_is_encoded_and_highlighted(monkeypatch, tmp_path):
         def raise_for_status(self):
             pass
 
-    async def post(url, *, data):
+    async def _post(url, *, data):
         posted.append((url, data))
         return Response()
 
     monkeypatch.setattr(tts, "POCKET_URL", "http://pocket:8000")
-    monkeypatch.setattr(tts._client, "post", post)
+    class Client:
+        post = staticmethod(_post)
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(tts, "_new_synthesis_client", Client)
     monkeypatch.setattr(tts, "_encode", lambda source: tts._SILENCE_MP3 if source == Response.content else None)
     monkeypatch.setattr(tts, "_CACHE", tmp_path)
 

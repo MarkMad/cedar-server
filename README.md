@@ -350,6 +350,15 @@ playback; at 2× playback it must stay below `0.5` to keep up. `source=lookahead
 identifies background generation. Timing lines identify clips by a hash rather
 than logging their text.
 
+Each upstream speech call owns a private HTTP connection pool, closed after
+success, failure, or cancellation; later jobs do not wait on a pool shared with
+earlier calls. Complete speech jobs have an absolute `CEDAR_TTS_TIMEOUT` limit
+(default 120 seconds) once their synthesis slot starts, covering upstream reads,
+format fallback, and processing. Queue wait is logged separately. Pocket streams
+retain their deadline including queue wait. Connection cleanup is independently
+bounded to five seconds and joined during shutdown. Transport failures are not
+automatically retried, so recovery does not replay partially generated audio.
+
 A few server-side knobs can also be changed at runtime with the key:
 
 ```bash
