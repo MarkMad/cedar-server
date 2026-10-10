@@ -249,6 +249,8 @@ All optional; set them in `.env` (compose reads it) or the environment.
 | `CEDAR_PORT` | `8000` | Host port (compose only). |
 | `CEDAR_DATA` | `/data` in the container | Where the database, uploads and audio cache live. |
 | `CEDAR_KOKORO_URL` | `http://kokoro:8880` | The voice engine. |
+| `CEDAR_TTS_CONCURRENCY` | `1` | Maximum simultaneous uncached speech jobs per server process. Increase for GPU hosts if useful. |
+| `CEDAR_KOKORO_CPUS` | `0` | Kokoro CPU-time budget (compose only); `0` is unlimited. Try `3` on a four-core server. |
 | `CEDAR_DEFAULT_VOICE` | `af_heart` | Voice for English until you pick one. |
 | `CEDAR_AUDIO_BITRATE_KBPS` | `64` | Bitrate of the mp3 sent to the app. Keep ≥ 64 (see `cedar/config.py` for why). |
 | `CEDAR_MAX_UPLOAD_MB` | `100` | Largest PDF/EPUB upload. |
@@ -256,6 +258,15 @@ All optional; set them in `.env` (compose reads it) or the environment.
 | `CEDAR_MAX_BODY_MB` | `8` | Largest body of any other request (pasted text, live pages). |
 | `CEDAR_BIND` | `0.0.0.0` | Interface the port is published on (compose only). `127.0.0.1` when a reverse proxy on this machine fronts it. |
 | `CEDAR_TRUSTED_PROXIES` | `127.0.0.1` | Reverse proxies whose `X-Forwarded-For` is believed, as IPs or CIDRs (compose only). |
+
+On small CPU servers such as an Intel N5105, synthesis runs one uncached
+sentence at a time so prefetch requests do not compete for CPU. Cached audio
+still returns immediately. In `.env`, set `CEDAR_KOKORO_CPUS=3` to leave some
+CPU capacity for DietPi and other services, then apply with
+`docker compose up -d --build`. This budget can slow generation; check that
+fresh audio stays ahead of playback before reducing it further. The speech
+model still needs substantial CPU for new audio; existing cached sentences
+need no inference. Keep the audio cache volume when recreating containers.
 
 A few server-side knobs can also be changed at runtime with the key:
 

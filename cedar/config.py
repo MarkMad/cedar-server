@@ -74,6 +74,12 @@ CHUNK_MIN_CHARS = 30
 # the longest chunk can take a while on a small box, so this is generous.
 TTS_TIMEOUT = float(os.environ.get("CEDAR_TTS_TIMEOUT", "120"))
 
+# Bound distinct cache misses; CPU voice engines otherwise compete with every
+# sentence in a client's prefetch burst. GPU hosts can raise this explicitly.
+TTS_CONCURRENCY = int(os.environ.get("CEDAR_TTS_CONCURRENCY", "1"))
+if TTS_CONCURRENCY < 1:
+    raise ValueError("CEDAR_TTS_CONCURRENCY must be at least 1")
+
 # Largest accepted PDF/EPUB upload. An uploaded file is held in memory (and a PDF
 # is then written to UPLOAD_DIR), so this bounds what one request can cost.
 MAX_UPLOAD_BYTES = int(os.environ.get("CEDAR_MAX_UPLOAD_MB", "100")) * 1024 * 1024
