@@ -23,7 +23,7 @@ from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import __version__, auth, db, dictionary, settings, translate
+from . import __version__, auth, db, dictionary, settings, translate, tts
 from .bodylimit import BodyLimitMiddleware
 from .config import DATA_DIR, SERVER_NAME
 from .routes import all_routers
@@ -72,7 +72,10 @@ async def _lifespan(app: FastAPI):
     auth.load_key()
     logging.getLogger("cedar").info("cedar-server %s ready (schema v%d, data in %s)",
                                     __version__, db.schema_version(), DATA_DIR)
-    yield
+    try:
+        yield
+    finally:
+        await tts.shutdown_synthesis()
 
 
 # No interactive docs and no published schema: the API is for the app, and a

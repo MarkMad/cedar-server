@@ -37,12 +37,14 @@ import re
 import subprocess
 import tempfile
 import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import httpx
 
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_DIR, AUDIO_FORMAT,
-                     AUDIO_SOURCE_FORMAT, KOKORO_URL, TTS_CONCURRENCY, TTS_TIMEOUT)
+                     AUDIO_SOURCE_FORMAT, KOKORO_URL, TTS_CONCURRENCY, TTS_LOOKAHEAD, TTS_TIMEOUT)
 
 _CACHE = AUDIO_DIR / "cache"
 _CACHE.mkdir(parents=True, exist_ok=True)
@@ -703,25 +705,144 @@ _client = httpx.AsyncClient(
 # chunk await one task instead of each hitting Kokoro. Callers awaiting the
 # task are independent of it: a disconnected request doesn't cancel the
 # synthesis, and the result still lands in the disk cache.
-_inflight: Dict[str, "asyncio.Task[dict]"] = {}
-_synth_slots = asyncio.Semaphore(TTS_CONCURRENCY)
+_MAX_PREFETCH_PENDING = 32
+_MAX_PREFETCH_WINDOWS = 32
+_inflight: Dict[str, "asyncio.Future[dict]"] = {}
 
 
-async def _synth_queued(key: str, text: str, voice: str) -> dict:
-    # Cache hits never wait behind neural synthesis or encoding.
-    async with _synth_slots:
-        cached = await asyncio.to_thread(_read_cache, key)
-        if cached is not None:
-            return cached
-        return await _synth_uncached(key, text, voice)
+@dataclass
+class _SynthesisJob:
+    key: str
+    text: str
+    voice: str
+    future: asyncio.Future
+    queued_at: float = field(default_factory=time.monotonic)
+    foreground: bool = False
+    owners: set[tuple[int, str]] = field(default_factory=set)
 
 
-def _synth_done(key: str, task: asyncio.Task) -> None:
-    _inflight.pop(key, None)
-    # All callers may have disconnected. Retrieve the exception so a failed
-    # background job does not produce an unhandled-task warning.
-    if not task.cancelled():
-        task.exception()
+_demand: OrderedDict[str, _SynthesisJob] = OrderedDict()
+_speculative: OrderedDict[str, _SynthesisJob] = OrderedDict()
+_active: Dict[str, asyncio.Task] = {}
+_windows: OrderedDict[tuple[int, str], object] = OrderedDict()
+_closing = False
+
+
+def _retrieve_exception(future: asyncio.Future) -> None:
+    # A disconnected request or a speculative job may have no remaining waiter.
+    if not future.cancelled():
+        future.exception()
+
+
+def _new_job(key: str, text: str, voice: str, *, foreground: bool) -> _SynthesisJob:
+    future = asyncio.get_running_loop().create_future()
+    future.add_done_callback(_retrieve_exception)
+    _inflight[key] = future
+    return _SynthesisJob(key, text, voice, future, foreground=foreground)
+
+
+def _dispatch() -> None:
+    # Pending speculation is data, not a task waiting on a semaphore. New demand
+    # always wins the next free slot; an active inference is never preempted.
+    while not _closing and len(_active) < TTS_CONCURRENCY and (_demand or _speculative):
+        queue = _demand if _demand else _speculative
+        key, job = queue.popitem(last=False)
+        _active[key] = asyncio.create_task(_run_job(job))
+
+
+async def _run_job(job: _SynthesisJob) -> None:
+    queue_s = time.monotonic() - job.queued_at
+    started = time.monotonic()
+    source = "demand" if job.foreground else "lookahead"
+    try:
+        cached = await asyncio.to_thread(_read_cache, job.key)
+        result = cached if cached is not None else await _synth_uncached(job.key, job.text, job.voice)
+        elapsed = time.monotonic() - started
+        synth_s, processing_s = result.pop("_timing", (0.0, elapsed))
+        duration = float(result.get("duration", 0))
+        log.info("tts completed key=%s source=%s cached=%s queue_s=%.3f elapsed_s=%.3f "
+                 "synth_s=%.3f processing_s=%.3f audio_s=%.3f rtf=%.3f",
+                 job.key[:12], source, cached is not None, queue_s, elapsed,
+                 synth_s, processing_s, duration, elapsed / duration if duration > 0 else 0.0)
+        job.future.set_result(result)
+    except asyncio.CancelledError:
+        job.future.cancel()
+        raise
+    except Exception as exc:
+        # Exception messages from an upstream service can echo the source text.
+        log.warning("tts failed key=%s source=%s queue_s=%.3f elapsed_s=%.3f error=%s",
+                    job.key[:12], source, queue_s, time.monotonic() - started, type(exc).__name__)
+        job.future.set_exception(exc)
+    finally:
+        _active.pop(job.key, None)
+        _inflight.pop(job.key, None)
+        _dispatch()
+
+
+def _drop_owner(owner: tuple[int, str]) -> None:
+    for key, job in list(_speculative.items()):
+        job.owners.discard(owner)
+        if not job.owners:
+            _speculative.pop(key)
+            _inflight.pop(key, None)
+            job.future.cancel()
+
+
+def begin_document_request(doc_id: int, voice: str) -> object:
+    """Replace this document's pending window; keep active inference cacheable."""
+    owner = (doc_id, voice)
+    # A voice switch is a new playback window as well as a seek.
+    for previous in list(_windows):
+        if previous[0] == doc_id:
+            _windows.pop(previous)
+            _drop_owner(previous)
+    token = object()
+    _windows[owner] = token
+    while len(_windows) > _MAX_PREFETCH_WINDOWS:
+        old_owner, _ = _windows.popitem(last=False)
+        _drop_owner(old_owner)
+    return token
+
+
+def prefetch_document(doc_id: int, voice: str, token: object, texts: List[str]) -> None:
+    """Offer a bounded latest window without spawning a task per future sentence."""
+    owner = (doc_id, voice)
+    if not TTS_LOOKAHEAD or _closing or _windows.get(owner) is not token:
+        return
+    for text in texts[:TTS_LOOKAHEAD]:
+        if not _has_speech(text):
+            continue
+        key = _key(text, voice)
+        if key in _inflight:
+            if key in _speculative:
+                _speculative[key].owners.add(owner)
+            continue
+        if len(_speculative) >= _MAX_PREFETCH_PENDING:
+            break
+        job = _new_job(key, text, voice, foreground=False)
+        job.owners.add(owner)
+        _speculative[key] = job
+    _dispatch()
+
+
+async def shutdown_synthesis() -> None:
+    """Release queued jobs and join active tasks before the app loop closes."""
+    global _closing
+    _closing = True
+    try:
+        for job in [*_demand.values(), *_speculative.values()]:
+            job.future.cancel()
+        _demand.clear()
+        _speculative.clear()
+        tasks = list(_active.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        _active.clear()
+        _inflight.clear()
+        _windows.clear()
+    finally:
+        _closing = False
 
 
 def _read_cache(key: str) -> Optional[dict]:
@@ -832,13 +953,24 @@ async def _ask_kokoro(text: str, voice: str, fmt: str) -> tuple[bytes, List[dict
 
 
 async def _synth_uncached(key: str, text: str, voice: str) -> dict:
+    started = time.monotonic()
+    synth_s = 0.0
+
+    async def ask(fmt: str) -> tuple[bytes, List[dict]]:
+        nonlocal synth_s
+        requested_at = time.monotonic()
+        try:
+            return await _ask_kokoro(text, voice, fmt)
+        finally:
+            synth_s += time.monotonic() - requested_at
+
     # to_thread: the first call per process probes the encoder with a subprocess,
     # which would otherwise block the event loop for ~8 ms.
     want = AUDIO_SOURCE_FORMAT if await asyncio.to_thread(_probe) else AUDIO_FORMAT
     kbps = None
 
     try:
-        audio, raw_words = await _ask_kokoro(text, voice, want)
+        audio, raw_words = await ask(want)
     except httpx.HTTPError as exc:
         # Asking for the intermediate format is the one new way this call can
         # fail that the old code could not: self-hosters track a floating
@@ -857,7 +989,7 @@ async def _synth_uncached(key: str, text: str, voice: str) -> dict:
                     "(payloads will be ~2x larger)",
                     want, _kokoro_error(exc), AUDIO_FORMAT)
         want = AUDIO_FORMAT
-        audio, raw_words = await _ask_kokoro(text, voice, AUDIO_FORMAT)
+        audio, raw_words = await ask(AUDIO_FORMAT)
 
     if want != AUDIO_FORMAT:
         # Dedicated pool, not to_thread — see _ENCODE_POOL.
@@ -869,12 +1001,13 @@ async def _synth_uncached(key: str, text: str, voice: str) -> dict:
             # re-fetched with it so they describe the audio actually served.
             log.warning("mp3 re-encode failed; serving Kokoro's own audio for "
                         "this chunk (payload will be ~2x larger)")
-            audio, raw_words = await _ask_kokoro(text, voice, AUDIO_FORMAT)
+            audio, raw_words = await ask(AUDIO_FORMAT)
         else:
             audio, kbps = encoded, AUDIO_BITRATE_KBPS
 
-    return await asyncio.to_thread(_process_and_store, key, text, audio,
-                                   raw_words, kbps)
+    result = await asyncio.to_thread(_process_and_store, key, text, audio, raw_words, kbps)
+    result["_timing"] = (synth_s, time.monotonic() - started - synth_s)
+    return result
 
 
 # The clip served for a sentence with nothing to say (see _has_speech): 0.4 s of
@@ -934,15 +1067,21 @@ async def synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
 
     cached = await asyncio.to_thread(_read_cache, key)
     if cached is not None:
+        log.debug("tts cache hit key=%s", key[:12])
         return _client_payload(cached)
 
-    task = _inflight.get(key)
-    if task is None:
-        task = asyncio.create_task(_synth_queued(key, text, voice))
-        _inflight[key] = task
-        task.add_done_callback(lambda done: _synth_done(key, done))
+    future = _inflight.get(key)
+    if future is None:
+        job = _new_job(key, text, voice, foreground=True)
+        _demand[key] = job
+        future = job.future
+    elif key in _speculative:
+        job = _speculative.pop(key)
+        job.foreground = True
+        _demand[key] = job
+    _dispatch()
     # Shallow copy: coalesced callers share the payload but not the dict.
-    return _client_payload(dict(await asyncio.shield(task)))
+    return _client_payload(dict(await asyncio.shield(future)))
 
 
 def _client_payload(meta: dict) -> dict:

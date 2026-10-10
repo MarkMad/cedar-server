@@ -22,7 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .. import db, lang, pdflayout, settings, tts
 from ..chunker import chunk_article, chunk_plain_text, extract_epub, extract_pdf
-from ..config import MAX_UPLOAD_BYTES, MEDIA_DIR, UPLOAD_DIR
+from ..config import MAX_UPLOAD_BYTES, MEDIA_DIR, TTS_LOOKAHEAD, UPLOAD_DIR
 from ..safefetch import TooLargeError, UnsafeUrlError, safe_fetch
 
 router = APIRouter(prefix="/api")
@@ -364,12 +364,20 @@ def _sentence_for_tts(doc_id: int, idx: int) -> str:
 async def synth(doc_id: int, idx: int, voice: str = Query(...), speed: float = Query(1.0)):
     if not tts.valid_voice_id(voice):
         raise HTTPException(400, "Unknown voice.")
+    window = tts.begin_document_request(doc_id, voice) if TTS_LOOKAHEAD else None
     text = await asyncio.to_thread(_sentence_for_tts, doc_id, idx)
     speed = max(0.5, min(2.0, speed))
     try:
-        return await tts.synthesize(text, voice, speed)
+        result = await tts.synthesize(text, voice, speed)
     except Exception as e:
         raise HTTPException(502, f"TTS service error: {e}")
+    if window is not None:
+        try:
+            upcoming = await asyncio.to_thread(db.get_sentences, doc_id, idx + 1, TTS_LOOKAHEAD)
+            tts.prefetch_document(doc_id, voice, window, [sentence["text"] for sentence in upcoming])
+        except Exception as exc:
+            log.warning("tts lookahead skipped doc=%d error=%s", doc_id, type(exc).__name__)
+    return result
 
 
 @router.get("/documents/{doc_id}/pdf")
