@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -67,12 +68,12 @@ def available() -> bool:
     return CATALOG_DB.exists()
 
 
-def _connect() -> sqlite3.Connection:
+def _connect() -> closing[sqlite3.Connection]:
     # Read-only: the catalog is built offline by the ingest tool; the app never
     # writes it. mode=ro also makes a half-copied file fail loudly, not corrupt.
     con = sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True, timeout=10)
     con.row_factory = sqlite3.Row
-    return con
+    return closing(con)
 
 
 def full_catalog() -> bool:

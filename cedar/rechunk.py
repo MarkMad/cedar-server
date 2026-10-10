@@ -5,13 +5,15 @@ local corpus, everything else over HTTP), re-chunks it with the current splitter
 and replaces its sentences in place, preserving the reader's position by character
 offset. Book re-chunks also strip the printed table of contents and move anyone
 still in the front matter up to where the body begins (chunker.start_idx).
+Annotation and media anchors follow unchanged sentences. If an anchored sentence
+changed or cannot be identified unambiguously, the document is skipped intact.
 
 PDFs and pasted text are left alone (their source isn't re-fetchable, and the PDF
 path was never affected).
 
 Usage (inside the container):
-    python -m backend.rechunk            # dry run: report old->new chunk counts
-    python -m backend.rechunk --apply    # back up the DB, then rewrite in place
+    python -m cedar.rechunk            # dry run: report old->new chunk counts
+    python -m cedar.rechunk --apply    # back up the DB, then rewrite in place
 """
 from __future__ import annotations
 
@@ -21,6 +23,8 @@ import json
 import re
 import sqlite3
 import time
+from collections import Counter
+from contextlib import closing
 
 import trafilatura
 
@@ -57,12 +61,8 @@ def _connect() -> sqlite3.Connection:
 
 def _backup_db() -> str:
     dest = f"{DB_PATH}.bak-{int(time.time())}"
-    src = sqlite3.connect(DB_PATH)
-    dst = sqlite3.connect(dest)
-    with dst:
+    with closing(sqlite3.connect(DB_PATH)) as src, closing(sqlite3.connect(dest)) as dst:
         src.backup(dst)  # consistent snapshot incl. any WAL frames
-    src.close()
-    dst.close()
     return dest
 
 
@@ -105,6 +105,38 @@ def _map_progress(old_texts: list[str], old_idx: int, new_chunks: list) -> int:
     return max(0, len(new_chunks) - 1)
 
 
+def _anchor_mapping(conn: sqlite3.Connection, doc_id: int,
+                    old_texts: list[str], new_chunks: list) -> dict[int, int] | None:
+    """Only move anchors when their sentence identity is certain; never drop marks."""
+    anchors = set()
+    media_at_end = False
+    for table, column in (("bookmarks", "idx"), ("highlights", "idx"), ("media", "anchor_idx")):
+        for row in conn.execute(f"SELECT {column} FROM {table} WHERE doc_id=?", (doc_id,)):
+            idx = row[0]
+            if table == "media" and idx == len(old_texts):
+                media_at_end = True
+            else:
+                anchors.add(idx)
+    new_texts = [ch.text for ch in new_chunks]
+    old_counts, new_counts = Counter(old_texts), Counter(new_texts)
+    positions = {ch.text: ch.idx for ch in new_chunks}
+    unchanged = old_texts == new_texts
+    mapping = {}
+    if media_at_end:
+        mapping[len(old_texts)] = len(new_chunks)
+    for idx in anchors:
+        if not 0 <= idx < len(old_texts):
+            return None
+        text = old_texts[idx]
+        if unchanged:
+            mapping[idx] = new_chunks[idx].idx
+        elif old_counts[text] == new_counts[text] == 1:
+            mapping[idx] = positions[text]
+        else:
+            return None
+    return mapping
+
+
 async def _rechunk_doc(conn: sqlite3.Connection, row: sqlite3.Row, apply: bool) -> None:
     doc_id, kind, url, title = row["id"], row["kind"], row["source_url"], row["title"]
     old_texts = [r["text"] for r in conn.execute(
@@ -123,26 +155,50 @@ async def _rechunk_doc(conn: sqlite3.Connection, row: sqlite3.Row, apply: bool) 
     # Anyone who hadn't listened past the front matter starts at the body now.
     new_idx = max(new_idx, result.start_idx)
 
-    verb = "rewrote" if apply else "would rewrite"
-    print(f"  [{doc_id}] {title!r}: {len(old_texts)} -> {len(result.chunks)} chunks, "
-          f"idx {old_idx} -> {new_idx}  ({verb})")
-
     if not apply:
+        if _anchor_mapping(conn, doc_id, old_texts, result.chunks) is None:
+            print(f"  [{doc_id}] {title!r}: anchored text changed or ambiguous — would skip intact")
+            return
+        print(f"  [{doc_id}] {title!r}: {len(old_texts)} -> {len(result.chunks)} chunks, "
+              f"idx {old_idx} -> {new_idx}  (would rewrite)")
         return
-    now = time.time()
-    conn.execute("DELETE FROM sentences WHERE doc_id=?", (doc_id,))
-    conn.executemany(
-        "INSERT INTO sentences (doc_id, idx, page, para, text, heading) VALUES (?,?,?,?,?,?)",
-        [(doc_id, ch.idx, ch.page, ch.para, ch.text, getattr(ch, "heading", 0)) for ch in result.chunks])
-    conn.execute("DELETE FROM toc WHERE doc_id=?", (doc_id,))
-    conn.executemany(
-        "INSERT INTO toc (doc_id, ord, level, title, page, sentence_idx) VALUES (?,?,?,?,?,?)",
-        [(doc_id, i, t.level, t.title, t.page, t.sentence_idx) for i, t in enumerate(result.toc)])
-    conn.execute(
-        """UPDATE documents SET num_sentences=?, num_pages=?, pages_json=?, current_idx=?,
-           updated_at=?, content_rev = content_rev + 1 WHERE id=?""",
-        (len(result.chunks), result.num_pages, json.dumps(result.pages), new_idx, now, doc_id))
-    conn.commit()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # Refetching can take seconds; use the latest text and reading position
+        # under the writer lock, including marks added while the fetch ran.
+        current = conn.execute("SELECT current_idx FROM documents WHERE id=?", (doc_id,)).fetchone()
+        if current is None:
+            return
+        old_texts = [r["text"] for r in conn.execute(
+            "SELECT text FROM sentences WHERE doc_id=? ORDER BY idx", (doc_id,))]
+        mapping = _anchor_mapping(conn, doc_id, old_texts, result.chunks)
+        if mapping is None:
+            print(f"  [{doc_id}] {title!r}: anchored text changed or ambiguous — skipped intact")
+            return
+        new_idx = max(_map_progress(old_texts, current["current_idx"], result.chunks), result.start_idx)
+        conn.execute("DELETE FROM sentences WHERE doc_id=?", (doc_id,))
+        conn.executemany(
+            "INSERT INTO sentences (doc_id, idx, page, para, text, heading) VALUES (?,?,?,?,?,?)",
+            [(doc_id, ch.idx, ch.page, ch.para, ch.text, getattr(ch, "heading", 0)) for ch in result.chunks])
+        conn.execute("DELETE FROM toc WHERE doc_id=?", (doc_id,))
+        conn.executemany(
+            "INSERT INTO toc (doc_id, ord, level, title, page, sentence_idx) VALUES (?,?,?,?,?,?)",
+            [(doc_id, i, t.level, t.title, t.page, t.sentence_idx) for i, t in enumerate(result.toc)])
+        # Move through temporary negative indices so shifts cannot collide with
+        # another bookmark/highlight's UNIQUE key before it has been moved.
+        for table, column in (("bookmarks", "idx"), ("highlights", "idx"), ("media", "anchor_idx")):
+            for old in mapping:
+                conn.execute(f"UPDATE {table} SET {column}=? WHERE doc_id=? AND {column}=?",
+                             (-old - 1, doc_id, old))
+            for old, new in mapping.items():
+                conn.execute(f"UPDATE {table} SET {column}=? WHERE doc_id=? AND {column}=?",
+                             (new, doc_id, -old - 1))
+        conn.execute(
+            """UPDATE documents SET num_sentences=?, num_pages=?, pages_json=?, current_idx=?,
+               updated_at=?, content_rev = content_rev + 1, generated_voice=NULL WHERE id=?""",
+            (len(result.chunks), result.num_pages, json.dumps(result.pages), new_idx, time.time(), doc_id))
+    print(f"  [{doc_id}] {title!r}: {len(old_texts)} -> {len(result.chunks)} chunks, "
+          f"idx {current['current_idx']} -> {new_idx}  (rewrote)")
 
 
 async def main() -> None:
@@ -156,21 +212,20 @@ async def main() -> None:
         print(f"Backed up DB -> {_backup_db()}")
 
     kinds = ("url", "book") if args.kind == "all" else (args.kind,)
-    conn = _connect()
-    rows = conn.execute(
-        f"SELECT * FROM documents WHERE kind IN ({','.join('?' * len(kinds))}) "
-        "AND source_url IS NOT NULL ORDER BY id",
-        kinds,
-    ).fetchall()
-    print(f"{'Applying to' if args.apply else 'Dry run over'} {len(rows)} url/book documents:")
-    for row in rows:
-        try:
-            await _rechunk_doc(conn, row, args.apply)
-        except UnsafeUrlError as e:
-            print(f"  [{row['id']}] {row['title']!r}: unsafe url — {e}")
-        except Exception as e:  # noqa: BLE001 — report and continue per doc
-            print(f"  [{row['id']}] {row['title']!r}: FAILED — {type(e).__name__}: {e}")
-    conn.close()
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM documents WHERE kind IN ({','.join('?' * len(kinds))}) "
+            "AND source_url IS NOT NULL ORDER BY id",
+            kinds,
+        ).fetchall()
+        print(f"{'Applying to' if args.apply else 'Dry run over'} {len(rows)} url/book documents:")
+        for row in rows:
+            try:
+                await _rechunk_doc(conn, row, args.apply)
+            except UnsafeUrlError as e:
+                print(f"  [{row['id']}] {row['title']!r}: unsafe url — {e}")
+            except Exception as e:  # noqa: BLE001 — report and continue per doc
+                print(f"  [{row['id']}] {row['title']!r}: FAILED — {type(e).__name__}: {e}")
     print("Done." + ("" if args.apply else "  (no changes written — re-run with --apply)"))
 
 

@@ -13,6 +13,7 @@ create a setting nothing reads.
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 from . import lang
@@ -58,12 +59,16 @@ def get(key: str, default: Any = None) -> Any:
 
 def put(key: str, value: Any) -> None:
     with connect() as c:
-        if value is None:
-            c.execute("DELETE FROM settings WHERE key=?", (key,))
-        else:
-            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
-                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                      (key, json.dumps(value)))
+        _put(c, key, value)
+
+
+def _put(c: sqlite3.Connection, key: str, value: Any) -> None:
+    if value is None:
+        c.execute("DELETE FROM settings WHERE key=?", (key,))
+    else:
+        c.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (key, json.dumps(value)))
 
 
 # ------------------------------------------------------------------- server knobs
@@ -78,8 +83,10 @@ def update_knobs(patch: dict[str, Any]) -> dict[str, Any]:
     for k in patch:
         if k not in KNOBS:
             raise KeyError(k)
-    for k, v in patch.items():
-        put(k, None if v is None else _coerce(k, v))
+    values = {k: None if v is None else _coerce(k, v) for k, v in patch.items()}
+    with connect() as c:
+        for k, v in values.items():
+            _put(c, k, v)
     return knobs()
 
 
@@ -131,12 +138,17 @@ def set_voice(voice: str, language: str | None = None) -> None:
     The flat ``voice`` key is written too for clients that predate per-language
     voices.
     """
-    voices = dict(get("voices") or {})
     language = language or lang.language_of(voice)
-    if language:
-        voices[language] = voice
-    put("voices", voices)
-    put("voice", voice)
+    with connect() as c:
+        # Reserve the writer before reading: another device must see this
+        # update before it reads and modifies the same mapping.
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT value FROM settings WHERE key='voices'").fetchone()
+        voices = dict(json.loads(row["value"]) if row else {})
+        if language:
+            voices[language] = voice
+        _put(c, "voices", voices)
+        _put(c, "voice", voice)
 
 
 def reading_defaults() -> tuple[str, float]:

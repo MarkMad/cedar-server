@@ -89,3 +89,11 @@ def test_catalog_absent_is_not_an_error(client):
     r = client.get("/api/catalog", headers=AUTH)
     assert r.status_code == 200 and r.json()["available"] is False
     assert client.get("/api/catalog/books/1342", headers=AUTH).status_code == 404
+
+
+def test_negative_highlight_index_rejected(client):
+    did = _import(client)["id"]
+    r = client.post(f"/api/documents/{did}/highlights", headers=AUTH,
+                    json={"idx": -1, "cs": 0, "ce": 7})
+    assert r.status_code == 422
+    assert client.get(f"/api/documents/{did}/highlights", headers=AUTH).json()["highlights"] == []
