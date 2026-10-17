@@ -49,7 +49,7 @@ From the repository directory, use the ARM64 Compose override:
 docker compose -f docker-compose.yml -f docker-compose.arm64.yml up -d --build
 ```
 
-The override selects `linux/arm64` for Cedar, Kokoro, and the optional Classics image. Kokoro `v0.6.0` publishes an ARM64 image manifest. Initial build and model downloads can take a while.
+The override selects `linux/arm64` for Cedar, Kokoro, and the optional Classics image. Kokoro `v0.9.0` publishes an ARM64 image manifest. Initial build and model downloads can take a while.
 
 Check startup and get the generated owner key:
 
