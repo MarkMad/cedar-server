@@ -13,7 +13,7 @@
 
 services:
   kokoro:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.6.0
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.0
     # Optional CPU-time budget (0 = unlimited). On a four-core N5105, try 3.
     cpus: ${CEDAR_KOKORO_CPUS:-0}
     restart: unless-stopped
