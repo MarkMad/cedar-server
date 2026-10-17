@@ -68,6 +68,17 @@ AUDIO_SOURCE_FORMAT = os.environ.get("CEDAR_AUDIO_SOURCE_FORMAT", "wav").strip()
 # warns at startup).
 AUDIO_BITRATE_KBPS = int(os.environ.get("CEDAR_AUDIO_BITRATE_KBPS", "64"))
 
+# Evict least-recently-used sentence clips once the audio cache grows past
+# this many GiB. The cache is exact-sentence memoization (key = voice + text)
+# and holds no shared phrases, so for a listener who seldom re-reads it is a
+# one-heavy-tail table of once-played clips; this bounds it. Reads touch the
+# files' mtimes, so what sheds is what has gone unplayed the longest — the
+# resume-and-replay window a listener actually reuses is the newest slice.
+# 0 (the default) keeps the cache unbounded, as it has always been.
+AUDIO_CACHE_GB = float(os.environ.get("CEDAR_AUDIO_CACHE_GB", "0"))
+if AUDIO_CACHE_GB < 0:
+    raise ValueError("CEDAR_AUDIO_CACHE_GB must be 0 (unlimited) or a positive size")
+
 # TTS chunking targets (characters). Short chunks = fast first-audio + reliable timestamps.
 CHUNK_MAX_CHARS = 350
 CHUNK_MIN_CHARS = 30

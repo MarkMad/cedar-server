@@ -47,7 +47,7 @@ from typing import Dict, List, Optional, Tuple
 import anyio
 import httpx
 
-from .config import (AUDIO_BITRATE_KBPS, AUDIO_DIR, AUDIO_FORMAT,
+from .config import (AUDIO_BITRATE_KBPS, AUDIO_CACHE_GB, AUDIO_DIR, AUDIO_FORMAT,
                      AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_URL, TTS_CONCURRENCY,
                      TTS_LOOKAHEAD, TTS_TIMEOUT)
 from .pocket_stream import wav_pcm
@@ -98,6 +98,60 @@ def _sweep_enc_tmp(max_age_s: float = 3600.0) -> int:
 # handler, so this deliberately does not try to log what it removed — the count
 # would go nowhere. It is recorded so a status endpoint could report it.
 stale_encoder_files_cleared = _sweep_enc_tmp()
+
+
+def _sweep_audio_cache() -> int:
+    """Shed least-recently-used clip pairs once the cache exceeds the cap.
+
+    _read_cache touches both files' mtimes on every hit, so mtime *is* last
+    used: the recent listening window a slow listener actually replays
+    survives, and the shed is the long tail of played-once clips that would
+    otherwise accrue forever. A pair is only visible once both of its files
+    exist (meta is written last), so a startup snapshot sees complete entries
+    only — same single-process reasoning as _sweep_enc_tmp. 0 disables and the
+    default, preserving the cache's historical no-eviction behavior.
+    """
+    cap = AUDIO_CACHE_GB * (1 << 30)
+    if cap <= 0:
+        return 0
+    try:
+        audio_paths = list(_CACHE.iterdir())
+    except OSError:
+        return 0
+    pairs, total = [], 0
+    for audio in audio_paths:
+        if audio.suffix != "." + AUDIO_FORMAT:
+            continue
+        meta = audio.with_suffix(".json")
+        try:
+            meta_stat = meta.stat()
+            audio_stat = audio.stat()
+        except OSError:
+            # A lone file cannot be served (the probe needs both); leaving a
+            # crash orphan to a manual wipe keeps this function read-only on
+            # anything that isn't a deletable pair.
+            continue
+        total += audio_stat.st_size + meta_stat.st_size
+        pairs.append((audio, meta, audio_stat.st_mtime))
+    if total <= cap:
+        return 0
+    pairs.sort(key=lambda entry: entry[2])
+    shed = 0
+    for audio, meta, _ in pairs:
+        if total <= cap:
+            break
+        try:
+            size = audio.stat().st_size + meta.stat().st_size
+            audio.unlink()
+            meta.unlink()
+        except OSError:
+            continue
+        total -= size
+        shed += 1
+    return shed
+
+
+cache_pairs_shed = _sweep_audio_cache()
 
 # "cedar.*", not __name__: main._configure_logging() attaches the rotating
 # file handler to the "cedar" and "uvicorn.error" trees only. A "cedar.tts"
@@ -1041,6 +1095,16 @@ def _read_cache(key: str) -> Optional[dict]:
     if not (meta_path.exists() and audio_path.exists()):
         return None
     meta = json.loads(meta_path.read_text())
+    # Touch both pair files so the eviction sweep reads mtime as last-used
+    # (see _sweep_audio_cache). Two cheap calls that only run when eviction is
+    # configured — with the cap off, the read path does nothing new.
+    if AUDIO_CACHE_GB > 0:
+        now = time.time()
+        try:
+            os.utime(audio_path, (now, now))
+            os.utime(meta_path, (now, now))
+        except OSError:
+            pass
     # An entry written by an older aligner that kept its inputs is re-aligned
     # in place — cached audio gets alignment fixes without re-synthesis.
     # (Entries from before "text"/"raw" were stored are served as they are.)

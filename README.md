@@ -318,6 +318,7 @@ All optional; set them in `.env` (compose reads it) or the environment.
 | `CEDAR_KOKORO_CPUS` | `0` | Kokoro CPU-time budget (compose only); `0` is unlimited. Try `3` on a four-core server. |
 | `CEDAR_DEFAULT_VOICE` | `af_heart` | Voice for English until you pick one. |
 | `CEDAR_AUDIO_BITRATE_KBPS` | `64` | Bitrate of the mp3 sent to the app. Keep ≥ 64 (see `cedar/config.py` for why). |
+| `CEDAR_AUDIO_CACHE_GB` | `0` | Shed least-recently-played sentence clips once the audio cache grows past this many GiB; `0` keeps it unbounded. The cache shares no clips between sentences, so this is safe to set by listening habits (see `cedar/config.py`). |
 | `CEDAR_MAX_UPLOAD_MB` | `100` | Largest PDF/EPUB upload. |
 | `CEDAR_MAX_FETCH_MB` | `60` | Largest page/PDF "import from link" will download. |
 | `CEDAR_MAX_BODY_MB` | `8` | Largest body of any other request (pasted text, live pages). |
