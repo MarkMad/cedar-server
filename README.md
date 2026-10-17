@@ -464,7 +464,7 @@ What ends up on the shelf:
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 # Kokoro must be reachable; the simplest is its own container:
-docker run -d -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:v0.6.0
+docker run -d -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.0
 CEDAR_DATA=./data .venv/bin/uvicorn cedar.main:app --host 0.0.0.0 --port 8000
 ```
 
