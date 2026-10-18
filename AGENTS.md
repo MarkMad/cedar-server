@@ -65,19 +65,73 @@ rechunking existing documents, and preserve annotation anchors and audio caches.
 
 ## Delegate tasks
 
-The main agent should orchestrate delegated work and remain responsible for integration, verification, and the final result. Choose the model directly from the task’s complexity; do not use an automatic model escalation ladder.
+The main agent orchestrates delegated work and remains responsible for
+integration, verification, and the final result. Delegate by choosing the right
+*sub-agent kind* for the task; do not treat it as an automatic model-escalation
+ladder. Two sub-agents are available via the `subagent` tool:
 
-- For small, well-defined, low-risk implementation tasks, delegate one bounded change to `gpt-6-luna` with `reasoning_effort: "low"` when available. Examples include copy edits, minor styling changes, straightforward bug fixes with an understood cause, and small test updates.
-- For moderate multi-file changes, debugging, or adapting patches, delegate to `gpt-6.1-sol` with `reasoning_effort: "medium"` when available. Use `reasoning_effort: "high"` for bounded tasks requiring deeper analysis, such as concurrency bugs or transaction correctness. Prefer this current workhorse over the previous-generation `gpt-6-sol`.
-- For exceptionally demanding reasoning or an independent review of a complex design, use `gpt-6-astra` with `reasoning_effort: "high"` when the task justifies it. Do not select Astra merely because it is available; the main agent still owns architecture, sensitive fork behavior, broad integration, and final review.
-- Choose only model IDs and reasoning efforts supported by the current delegation tool. These are task-routing preferences, not an escalation ladder. If the selected model is unavailable, complete the task directly or use an available model suited to the same scope, and briefly report the fallback. Never silently substitute a more expensive agent.
-- With `collaboration.spawn_agent`, use `fork_turns: "none"` and supply a concise, self-contained brief containing the request, relevant paths, constraints, and acceptance criteria.
-- While the sub-agent implements the change, do useful independent work such as inspecting callers, identifying regression risks, or preparing verification. Avoid duplicating its implementation or editing the same files concurrently.
-- Give the sub-agent a narrow scope and ask it to report changed files, checks performed, and unresolved issues. Do not let it delegate further for a simple task.
-- Review its actual diff and perform proportionate verification before reporting completion. The main agent owns integration, correctness, and communication with the user.
-- Answer simple conversational questions directly. If delegation tools or the selected model are unavailable, complete the work directly and briefly mention the fallback.
-- Handle trivial edits directly when preparing and reviewing a delegation would take more work than the edit itself.
-- Do not ask for confirmation merely to use this workflow. Respect the user's latest instructions and all applicable permission boundaries.
+- `explore` — fast, read-only codebase exploration: find files by pattern,
+  search for keywords/symbols, and answer "how does X work" questions. State the
+  desired thoroughness (`quick`, `medium`, or `very thorough`). Use it to gather
+  context before changing code — e.g. tracing callers of `tts.synthesize`,
+  locating route/endpoint handling under `cedar/routes/`, or mapping which tests
+  under `tests/` cover a module.
+- `general` — general-purpose multi-step work that can run in parallel with my
+  own work — e.g. adapting a patch across several files, a bounded refactor, or
+  investigating independent questions concurrently.
+
+Routing guidance:
+
+- For small, well-defined, low-risk edits (copy edits, minor styling, a
+  straightforward fix with an understood cause, small test updates), do them
+  directly — preparing and reviewing a delegation would cost more than the edit.
+- For read-only exploration and context-gathering, prefer `explore`.
+- For independent, parallelizable, or self-contained multi-step work, delegate
+  to `general`.
+- The main agent still owns architecture, invasive changes to the synthesis and
+  alignment pipeline (`tts.py`), SQLite migrations or rechunking in `db.py`,
+  the deny-by-default auth and SSRF-safe fetching boundaries, app-facing API
+  compatibility, broad integration, and final review. Do not delegate those.
+
+Model selection:
+
+- Do not set the sub-agent `model` parameter unless the user explicitly asks for
+  a specific model or variant. When they do, resolve the exact reference with
+  the models tool before passing it.
+- If the chosen sub-agent is unavailable, complete the task directly or use an
+  available sub-agent suited to the same scope, and briefly report the fallback.
+  Never silently substitute a more expensive agent.
+
+Briefs and lifecycle:
+
+- New child sessions start with fresh context, so include all relevant context
+  and instructions. Supply a concise, self-contained brief: the request,
+  relevant paths, constraints, and acceptance criteria.
+- Give the sub-agent a narrow scope and ask it to report changed files, checks
+  performed, and unresolved issues. Do not let it delegate further for a simple
+  task.
+- Run independent sub-agents concurrently (e.g. multiple `subagent` calls in the
+  same tool block). Use `background: true` only for independent work that can
+  proceed while I continue elsewhere; I am notified on completion and must not
+  poll or sleep.
+- Pass back the returned `sessionID` to continue a specific sub-agent
+  conversation; otherwise a new session starts fresh.
+- While a sub-agent implements a change, do useful independent work such as
+  inspecting callers, identifying regression risks, or preparing verification.
+  Avoid duplicating its implementation or editing the same files concurrently.
+
+Verification and communication:
+
+- Review the actual diff and perform proportionate verification before
+  reporting completion — e.g. `ruff check cedar tools tests` plus the relevant
+  `pytest tests` subsets for the touched modules; add
+  `python tools/lang_selftest.py` / `python tools/align_selftest.py` when
+  language or alignment behavior changed. The main agent owns integration,
+  correctness, and communication with the user.
+- Answer simple conversational questions directly. If delegation tools are
+  unavailable, complete the work directly and briefly mention the fallback.
+- Do not ask for confirmation merely to use this workflow. Respect the user's
+  latest instructions and all applicable permission boundaries.
 
 ## GitHub updates
 
