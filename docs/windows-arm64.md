@@ -70,10 +70,43 @@ docker compose -f docker-compose.yml -f docker-compose.arm64.yml exec -u cedar c
 
 The `cedar-data` named volume keeps the library, owner key, and audio cache across
 rebuilds. Do not use `down -v` unless you intend to delete that data. Do not combine
-this profile with the NVIDIA GPU override. The optional Pocket TTS override has
-not been validated for this ARM64 setup; start with the standard Kokoro voices.
+this profile with the NVIDIA GPU override. Pocket TTS voices are optional on ARM too:
+see [Pocket TTS voices](#3-optional-pocket-tts-voices).
 
-## 3. Connect from devices on your network
+## 3. Optional: Pocket TTS voices
+
+Pocket TTS adds four English voices — Alba, Anna, Marius, and Jean — next to the Kokoro
+voices. It is CPU-only, so it runs on the Snapdragon without a GPU. List the ARM64
+override last so its image names win the merge, and enable the `pocket` profile:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.pocket.yml \
+  -f docker-compose.arm64.yml --profile pocket up -d --build
+```
+
+The first start builds the Pocket image and downloads its model, which takes a while. The
+Pocket container stays private to the Compose network; Cedar keeps the same address,
+owner key, library, and reading positions. Refresh the app's voice picker and choose
+Pocket Alba, Anna, Marius, or Jean.
+
+Pocket's server returns audio without word timestamps. Cedar estimates each word's
+timing from the finished audio, so the highlight is approximate. Cedar encodes Pocket's
+WAV response to MP3 with `lame`, which the standard Cedar image already includes. If
+Pocket is unavailable, the Kokoro voices still work.
+
+On ARM, Pocket's int8 quantization runs on the QNNPACK backend: `torchao` publishes no
+ARM64 wheels, so Pocket falls back to PyTorch's own quantized engine. The `pocket`
+profile is what keeps the container out of the default ARM stack. Without
+`--profile pocket`, Compose reports that `cedar` depends on an undefined `pocket`
+service, so keep the flag for later commands as well — `ps`, `logs`, and `down` all need
+the same file list.
+
+Give both engines room. Start with `CEDAR_TTS_CONCURRENCY=1`, `CEDAR_KOKORO_CPUS=3`,
+and the override's default `CEDAR_POCKET_CPUS=2`; raise the CPU ceilings if the
+Snapdragon stays idle. The Pocket profile also raises `CEDAR_TTS_LOOKAHEAD` to 6, so
+Cedar warms more upcoming sentences into the cache.
+
+## 4. Connect from devices on your network
 
 For a phone or other device on your LAN, use the Windows PC's LAN IPv4 address with port 8000, for example `http://192.168.1.20:8000`. Find it in Windows with `ipconfig`. `localhost` is only for the PC itself. WSL networking and Windows firewall rules affect LAN access: if another device cannot open the status page, check the Windows network profile, the current WSL networking mode, and whether an inbound TCP 8000 rule is needed. Configure any firewall rule yourself and limit it to the trusted network; do not expose the plain HTTP service to the public internet.
 

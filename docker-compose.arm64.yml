@@ -1,6 +1,10 @@
 # Native ARM64 deployment for Snapdragon / Windows on Arm with WSL 2.
 # docker compose -f docker-compose.yml -f docker-compose.arm64.yml up -d --build
 # CPU inference; do not combine with the NVIDIA GPU override.
+#
+# Pocket TTS is opt-in. List this file last, so its image names win the merge:
+#   docker compose -f docker-compose.yml -f docker-compose.pocket.yml \
+#     -f docker-compose.arm64.yml --profile pocket up -d --build
 services:
   kokoro:
     platform: linux/arm64
@@ -12,3 +16,12 @@ services:
   classics:
     platform: linux/arm64
     image: cedar-classics:arm64
+
+  # Built here rather than pulled, so it needs the ARM64 pin and its own image
+  # name like the other services. The profile keeps it out of the default ARM
+  # stack; docker-compose.pocket.yml is required alongside it and supplies the
+  # build, volumes, CPUs, quantization, and the Cedar side of the link.
+  pocket:
+    profiles: ["pocket"]
+    platform: linux/arm64
+    image: cedar-pocket-tts:arm64

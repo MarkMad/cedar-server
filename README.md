@@ -44,7 +44,8 @@ reading positions, bookmarks and highlights.
 ## Install
 
 **Snapdragon / Windows on Arm:** use the [WSL 2 and native ARM64 guide](docs/windows-arm64.md).
-The ARM64 Compose profile runs Cedar and Kokoro on the CPU without x86 emulation.
+The ARM64 Compose profile runs Cedar and Kokoro on the CPU without x86 emulation, and
+Pocket TTS voices are available there as an opt-in.
 
 A few minutes, most of it download time. You need
 [Docker](https://docs.docker.com/get-docker/) and a machine that stays on — a
@@ -154,6 +155,8 @@ prepare audio as fast as the VM generates it, so some pauses may remain if
 inference takes longer than playback. The CPU limits are ceilings, not reserved cores.
 Pocket live reading also begins warming the first few lines as soon as Cedar receives
 the captured page, before the app requests speech for each line.
+On Snapdragon / Windows on Arm, the same override works next to the ARM64 profile; see
+the [ARM64 guide](docs/windows-arm64.md#3-optional-pocket-tts-voices) for the command.
 To return to the standard setup:
 
 ```bash
