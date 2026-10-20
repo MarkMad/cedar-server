@@ -28,19 +28,19 @@ Expect `aarch64` or `arm64`.
 
 ## 2. Put the repository in WSL and start Cedar
 
-For best Linux filesystem performance, keep the working copy in your Ubuntu home directory. If the repository is on the Windows D: drive at `/mnt/d/Projects/cedar-server-arm`, copy it with:
+For best Linux filesystem performance, keep the working copy in your Ubuntu home directory. If the repository is on the Windows D: drive at `/mnt/d/Projects/cedar-server`, copy it with:
 
 ```bash
-cp -a /mnt/d/Projects/cedar-server-arm ~/cedar-server-arm
-cd ~/cedar-server-arm
+cp -a /mnt/d/Projects/cedar-server ~/cedar-server
+cd ~/cedar-server
 ```
 
-Alternatively, clone this ARM64 repository directly into your WSL home directory:
+Alternatively, clone this repository directly into your WSL home directory:
 
 ```bash
 cd ~
-git clone https://github.com/MarkMad/cedar-server-arm.git
-cd cedar-server-arm
+git clone https://github.com/MarkMad/cedar-server.git
+cd cedar-server
 ```
 
 From the repository directory, use the ARM64 Compose override:
