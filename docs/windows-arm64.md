@@ -101,10 +101,28 @@ profile is what keeps the container out of the default ARM stack. Without
 service, so keep the flag for later commands as well — `ps`, `logs`, and `down` all need
 the same file list.
 
-Give both engines room. Start with `CEDAR_TTS_CONCURRENCY=1`, `CEDAR_KOKORO_CPUS=3`,
-and the override's default `CEDAR_POCKET_CPUS=2`; raise the CPU ceilings if the
-Snapdragon stays idle. The Pocket profile also raises `CEDAR_TTS_LOOKAHEAD` to 6, so
-Cedar warms more upcoming sentences into the cache.
+Give both engines room and keep some for Windows. The Snapdragon X2 Plus comes in a
+6-core and a 10-core part, and the ARM64 profile caps Kokoro at 3 cores by default
+(`CEDAR_KOKORO_CPUS`), which leaves the desktop usable on the 6-core model. The Pocket
+override keeps its own default of 2 cores (`CEDAR_POCKET_CPUS`), so with both engines
+running, 5 of the 6 cores are spoken for — drop Kokoro to 2 if the desktop feels
+sluggish.
+
+`CEDAR_TTS_CONCURRENCY` stays at 1 for a single listener. Raise it to 2 if you want the
+look-ahead to warm the next sentences while the current one plays: the slots are shared
+with on-demand speech, and demand always takes the next free one. On 6 cores that trade
+is rarely worth it, so leave it at 1 unless you have measured the wait.
+
+Both budgets are environment variables. Put them in a `.env` file next to the Compose
+files, and Compose picks them up automatically:
+
+```bash
+CEDAR_KOKORO_CPUS=3
+CEDAR_POCKET_CPUS=2
+```
+
+The Pocket profile also raises `CEDAR_TTS_LOOKAHEAD` to 6, so Cedar warms more upcoming
+sentences into the cache.
 
 ## 4. Connect from devices on your network
 

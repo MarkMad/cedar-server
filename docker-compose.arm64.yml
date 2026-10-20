@@ -8,6 +8,10 @@
 services:
   kokoro:
     platform: linux/arm64
+    # The Snapdragon X2 Plus has a 6-core part, and Windows wants cores too.
+    # Cap the voice engine at half the machine and leave the rest for Cedar
+    # and the desktop. 0 = unlimited; override with CEDAR_KOKORO_CPUS.
+    cpus: ${CEDAR_KOKORO_CPUS:-3}
 
   cedar:
     platform: linux/arm64

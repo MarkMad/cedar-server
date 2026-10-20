@@ -321,7 +321,7 @@ All optional; set them in `.env` (compose reads it) or the environment.
 | `CEDAR_KOKORO_URL` | `http://kokoro:8880` | The voice engine. |
 | `CEDAR_TTS_CONCURRENCY` | `1` | Maximum simultaneous uncached speech jobs per server process. Increase for GPU hosts if useful. |
 | `CEDAR_TTS_LOOKAHEAD` | `3` | Upcoming sentences to warm into the audio cache after a document speech request (0–10); `0` disables look-ahead. |
-| `CEDAR_KOKORO_CPUS` | `0` | Kokoro CPU-time budget (compose only); `0` is unlimited. Try `3` on a four-core server. |
+| `CEDAR_KOKORO_CPUS` | `0` | Kokoro CPU-time budget (compose only); `0` is unlimited. Try `3` on a four-core server. The ARM64 profile defaults to `3` for the 6-core Snapdragon X2 Plus. |
 | `CEDAR_DEFAULT_VOICE` | `af_heart` | Voice for English until you pick one. |
 | `CEDAR_AUDIO_BITRATE_KBPS` | `64` | Bitrate of the mp3 sent to the app. Keep ≥ 64 (see `cedar/config.py` for why). |
 | `CEDAR_AUDIO_CACHE_GB` | `0` | Shed least-recently-played sentence clips once the audio cache grows past this many GiB; `0` keeps it unbounded. The cache shares no clips between sentences, so this is safe to set by listening habits (see `cedar/config.py`). |
