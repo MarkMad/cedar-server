@@ -44,7 +44,8 @@ async def _fake_health() -> bool:
 
 
 async def _fake_list_voices() -> list[str]:
-    return ["af_heart", "am_michael", "ef_dora", "ff_siwis"]
+    return ["af_heart", "af_aoede", "af_bella", "bf_lily", "am_michael", "bm_george",
+            "ef_dora", "ff_siwis"]
 
 
 @pytest.fixture(scope="session")

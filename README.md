@@ -166,6 +166,28 @@ docker compose up -d
 
 Do not add `-v` to `down`: the named volumes hold Cedar's library and key.
 
+### Voice blends
+
+Kokoro can average two voices into one, so Cedar offers a few blends in the voice
+picker: "Addie & Lily" (Addie and Lily, half each) and "Addie & Lily (2:1)" (two
+thirds Addie), "Heart & Bella", "Nicole & Emma", "Echo & Daniel" and "Michael &
+George". A blend is one voice with traits of both, not two voices taking turns —
+pick one and every sentence is read in it.
+
+You can also ask for a blend of your own, in any proportion, through the API:
+
+```bash
+curl -X PUT http://<this-machine>:8000/api/settings \
+  -H "Authorization: Bearer <owner-key>" -H "Content-Type: application/json" \
+  -d '{"voice":"af_aoede(2)+bf_lily(1)"}'
+```
+
+The engine understands `+` to add a voice and `-` to take one away, with optional
+weights in parentheses; without weights the voices are mixed evenly. Cedar passes the
+mix straight to Kokoro, and the language follows the first voice in it. Blends are
+cached like any other voice, so switching back and forth does not re-synthesize
+what you have already heard.
+
 <details>
 <summary><b>Choose the key or the port yourself</b></summary>
 
@@ -487,7 +509,7 @@ the status page at `/`) is open.
 |---|---|
 | `GET /health` | open — `{ok, server, version, mode, name, kokoro_ok}` |
 | `GET /me` | the owner, shaped like an account the app can show |
-| `GET /voices` · `GET /voices/{id}/preview` | voice list with per-language defaults; a spoken intro |
+| `GET /voices` · `GET /voices/{id}/preview` | voice list with per-language defaults; a spoken intro. `names` names the voice blends |
 | `GET/PUT /settings` | synced preferences: `voices` (per language), `speed`, `theme` |
 | `GET/PUT /settings/server` | server knobs (book store switch, dictionary/translation tuning) |
 | `GET /documents` · `POST /documents` (multipart PDF/EPUB/TXT/MD) · `POST /documents/from_url` · `POST /documents/from_text` | the library |

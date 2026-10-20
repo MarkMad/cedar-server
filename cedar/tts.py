@@ -47,6 +47,7 @@ from typing import Dict, List, Optional, Tuple
 import anyio
 import httpx
 
+from . import blends
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_CACHE_GB, AUDIO_DIR, AUDIO_FORMAT,
                      AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_URL, TTS_CONCURRENCY,
                      TTS_LOOKAHEAD, TTS_TIMEOUT)
@@ -576,7 +577,10 @@ def _key(text: str, voice: str) -> str:
     # entry stays valid.
     # Keep every old Kokoro key valid, but isolate Pocket's different audio.
     engine = "pocket|" if voice in _POCKET_VOICES else ""
-    h = hashlib.sha1(f"{engine}{voice}|1.00|{text}".encode("utf-8")).hexdigest()
+    # A blend is keyed by the mix the engine speaks, not by the id the client
+    # asked for, so the catalog id and the mix behind it share one cache entry
+    # and a changed blend definition cannot serve stale audio.
+    h = hashlib.sha1(f"{engine}{blends.resolve(voice)}|1.00|{text}".encode("utf-8")).hexdigest()
     return h
 
 
@@ -1192,7 +1196,8 @@ async def _ask_kokoro(text: str, voice: str, fmt: str) -> tuple[bytes, List[dict
     payload = {
         "model": "kokoro",
         "input": _speakable(text),
-        "voice": voice,
+        # A blend reaches the engine as the mix of voices it is made of.
+        "voice": blends.resolve(voice),
         "speed": 1.0,
         "response_format": fmt,
         "stream": False,

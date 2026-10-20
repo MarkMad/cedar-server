@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import __version__, db, lang, settings, tts
+from .. import __version__, blends, db, lang, settings, tts
 from ..config import SERVER_NAME
 from ..textsafe import printable
 
@@ -80,9 +80,12 @@ async def voices():
 
     `defaults` lets the app label a language the owner hasn't chosen for
     ("Spanish — Dora") without keeping its own copy of a table that lives in
-    lang.py.
+    lang.py. `names` names the voice blends; the plain voices the app already
+    knows by heart.
     """
-    return {"voices": await tts.list_voices(),
+    engine_voices = await tts.list_voices()
+    return {"voices": engine_voices + blends.available(engine_voices),
+            "names": blends.names(engine_voices),
             "defaults": lang.defaults(),
             "languages": lang.LANG_LABEL}
 
@@ -109,8 +112,24 @@ _INTROS = {
 _NICE_NAMES = {"aoede": "Addie", "kore": "Cora", "alloy": "Allie", "fenrir": "Finn"}
 
 
+def _nice_name(voice: str) -> str:
+    """A speaker's friendly name for a voice id ("af_aoede" -> "Addie").
+
+    Takes a whole id or just the suffix after it, so "af_aoede" and "aoede"
+    both land on "Addie".
+    """
+    suffix = voice.split("_", 1)[-1] if _VOICE_RE.match(voice) else voice
+    return _NICE_NAMES.get(suffix, suffix.replace("_", " ").title())
+
+
 def _intro_for(voice: str) -> str:
-    m = _VOICE_RE.match(voice)
+    label = blends.name(voice)
+    parts = blends.components(voice) if blends.is_mix(voice) else []
+    if label is None and parts:
+        # A mix the caller made up: name the voices it is made of.
+        label = "a blend of " + " and ".join(_nice_name(part) for part in parts)
+    # A mix speaks the language of its first voice.
+    m = _VOICE_RE.match(parts[0] if parts else voice)
     lang_, gender, name = (m.group(1), m.group(2), m.group(3)) if m else ("a", "f", voice)
     if voice.startswith("ru_"):
         lang_, name = "r", voice[3:]
@@ -118,15 +137,23 @@ def _intro_for(voice: str) -> str:
         return ("नमस्ते! यह मेरी आवाज़ है। मुझे चुनिए, मैं आपकी किताबें और लेख पढ़कर "
                 + ("सुनाऊँगी।" if gender == "f" else "सुनाऊँगा।"))
     tmpl = _INTROS.get(lang_, _INTROS["a"])
-    nice = _NICE_NAMES.get(name, name.replace("_", " ").title())
+    nice = label or _nice_name(name)
     return tmpl.format(name=nice)
+
+
+def _known_voice(voice: str) -> bool:
+    """A voice the picker may ask about: a plain id, a Russian id, or a mix."""
+    if len(voice) > 40:
+        # A mix names its voices, so it needs more room than a single id.
+        return len(voice) <= 80 and blends.is_mix(voice)
+    return bool(_VOICE_RE.match(voice) or voice.startswith("ru_")) or blends.is_mix(voice)
 
 
 @router.get("/voices/{voice}/preview")
 async def voice_preview(voice: str):
     """A short spoken self-introduction for a voice (the picker's ▶ button).
     Cached by (text, voice) after the first synthesis like any other clip."""
-    if len(voice) > 40 or not (_VOICE_RE.match(voice) or voice.startswith("ru_")):
+    if not _known_voice(voice):
         raise HTTPException(400, "Unknown voice.")
     try:
         result = await tts.synthesize(_intro_for(voice), voice)
