@@ -37,6 +37,7 @@ import re
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -779,6 +780,7 @@ _TRANSPORT_CLOSE_TIMEOUT = 5.0
 _transport_closers: set[asyncio.Task] = set()
 
 _ssl_context: Optional[ssl.SSLContext] = None
+_ssl_lock = threading.Lock()
 
 
 def _shared_ssl_context() -> ssl.SSLContext:
@@ -789,10 +791,16 @@ def _shared_ssl_context() -> ssl.SSLContext:
     client is built on the event loop, so every synthesis stalls the loop for
     it. The trust store does not change while the process runs, so the
     context is built once and shared.
+
+    Startup builds it on a worker thread while a request may build its own
+    client, so the build has to be safe to enter from both. The lock is only
+    taken while the context is missing; after that the check is a plain read.
     """
     global _ssl_context
     if _ssl_context is None:
-        _ssl_context = httpx.create_ssl_context()
+        with _ssl_lock:
+            if _ssl_context is None:
+                _ssl_context = httpx.create_ssl_context()
     return _ssl_context
 
 

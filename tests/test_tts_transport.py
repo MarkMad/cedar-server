@@ -1,9 +1,11 @@
 """Private inference transports recover without restarting the application."""
 import asyncio
 import base64
+import concurrent.futures
 import json
 import ssl
 import struct
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -341,3 +343,29 @@ def test_startup_builds_the_trust_store_before_the_first_request(monkeypatch):
     asyncio.run(run())
     assert len(reads) == 1
     assert tts._ssl_context is not None
+
+
+def test_concurrent_callers_build_one_trust_store(monkeypatch):
+    """Two callers must not both build a trust store.
+
+    Startup builds the store on a worker thread while a request builds its
+    own client, so the build has to be safe to enter from both at once.
+    """
+    monkeypatch.setattr(tts, "_ssl_context", None)
+    reads = _count_bundle_reads(monkeypatch)
+    real_create_ssl_context = httpx.create_ssl_context
+
+    def slow_create_ssl_context(*args, **kwargs):
+        # Widen the window in which a second caller could slip past an
+        # unguarded check and build a store of its own.
+        time.sleep(0.05)
+        return real_create_ssl_context(*args, **kwargs)
+
+    monkeypatch.setattr(tts.httpx, "create_ssl_context", slow_create_ssl_context)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(tts._shared_ssl_context) for _ in range(8)]
+        contexts = [future.result() for future in futures]
+
+    assert len({id(context) for context in contexts}) == 1
+    assert len(reads) == 1
