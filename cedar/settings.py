@@ -34,16 +34,36 @@ KNOBS: dict[str, Any] = {
     # Translations under the definition (translate.py): kill switch + timeout.
     "translate_enabled": True,
     "translate_timeout_s": 4.0,
+    # Word substitutions (substitute.py): what the voice says instead of what
+    # the text says. {language: {word: replacement}}, with "*" for the rules
+    # that hold in every language. The settings route validates the shape.
+    "substitutions": {},
 }
 
 # Preferences the app syncs. `voices` is {lang: voice}; `voice` is the flat
 # "last picked" that older clients read; speed/theme are account-wide.
 PREF_KEYS = ("voice", "voices", "speed", "theme")
 
+# How many times the settings have been written. A cache can watch it to
+# know its copy is stale (see revision()).
+_revision = 0
+
 
 def init_tables() -> None:
+    global _revision
     with connect() as c:
         c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    _revision += 1
+
+
+def revision() -> int:
+    """How many times the settings have been written.
+
+    A cache of the settings can remember the number it read and know it is
+    out of date as soon as this moves (substitute.py holds the rules this
+    way, so reading them costs nothing on the request path).
+    """
+    return _revision
 
 
 def get(key: str, default: Any = None) -> Any:
@@ -63,12 +83,14 @@ def put(key: str, value: Any) -> None:
 
 
 def _put(c: sqlite3.Connection, key: str, value: Any) -> None:
+    global _revision
     if value is None:
         c.execute("DELETE FROM settings WHERE key=?", (key,))
     else:
         c.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (key, json.dumps(value)))
+    _revision += 1
 
 
 # ------------------------------------------------------------------- server knobs
@@ -98,6 +120,12 @@ def _coerce(key: str, value: Any) -> Any:
         return int(value)
     if isinstance(default, float):
         return float(value)
+    if isinstance(default, dict):
+        # A structured knob. The route that accepts it checks the shape; all
+        # that is left here is to keep it a JSON object.
+        if not isinstance(value, dict):
+            raise TypeError(f"{key} must be an object")
+        return value
     return str(value)
 
 

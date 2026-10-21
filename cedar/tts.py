@@ -49,7 +49,7 @@ from typing import Dict, List, Optional, Tuple
 import anyio
 import httpx
 
-from . import blends
+from . import blends, substitute
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_CACHE_GB, AUDIO_DIR, AUDIO_FORMAT,
                      AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_URL, TTS_CONCURRENCY,
                      TTS_LOOKAHEAD, TTS_TIMEOUT)
@@ -572,7 +572,7 @@ _POCKET_VOICES = {
 }
 
 
-def _key(text: str, voice: str) -> str:
+def _key(text: str, voice: str, spoken: Optional[str] = None) -> str:
     # The "1.00" segment is the speed that used to be part of the key. All
     # first-party clients have always requested 1.0 (tempo is playback-rate,
     # client-side), so keeping the literal means every pre-existing cache
@@ -582,7 +582,15 @@ def _key(text: str, voice: str) -> str:
     # A blend is keyed by the mix the engine speaks, not by the id the client
     # asked for, so the catalog id and the mix behind it share one cache entry
     # and a changed blend definition cannot serve stale audio.
-    h = hashlib.sha1(f"{engine}{blends.resolve(voice)}|1.00|{text}".encode("utf-8")).hexdigest()
+    payload = f"{engine}{blends.resolve(voice)}|1.00|{text}"
+    if spoken and spoken != text:
+        # The audio says the substituted words (substitute.py), so a rule set
+        # that speaks the text differently is a different clip. The original
+        # text stays in the key too: two originals that happen to speak the
+        # same way are still different clips, because the word timings point
+        # back into the original.
+        payload += f"\x00{spoken}"
+    h = hashlib.sha1(payload.encode("utf-8")).hexdigest()
     return h
 
 
@@ -871,7 +879,7 @@ class _SynthesisJob:
 @dataclass
 class _StreamJob:
     key: str
-    text: str
+    text: str      # what the engine is given — the substituted words
     voice: str
     future: asyncio.Future
     queue: asyncio.Queue
@@ -966,8 +974,12 @@ async def _run_stream_job(job: _StreamJob) -> None:
 
 async def stream_pocket(text: str, voice: str) -> AsyncIterator[bytes]:
     """Foreground PCM stream; closing it cancels only its own upstream job."""
+    # The owner's substitutions, so the stream says what the rules say it
+    # should. The stream carries no word timings, so there is nothing to map
+    # back: it is PCM and nothing else.
+    spoken, _ = substitute.plan(text, None, voice)
     future = asyncio.get_running_loop().create_future()
-    job = _StreamJob("stream:" + uuid.uuid4().hex, text, voice, future, asyncio.Queue(maxsize=2))
+    job = _StreamJob("stream:" + uuid.uuid4().hex, spoken, voice, future, asyncio.Queue(maxsize=2))
     if _closing:
         yield b'{"type":"error","code":"voice_service_failed"}\n'
         return
@@ -1074,10 +1086,14 @@ def prefetch_document(doc_id: int, voice: str, token: object, texts: List[str]) 
     owner = (doc_id, voice)
     if not TTS_LOOKAHEAD or _closing or _windows.get(owner) is not token:
         return
+    # The rules are read once for the whole window: the same owner, the same
+    # voice, the same rules for every sentence in it.
+    rules = substitute.rules_for(None, voice)
     for text in texts[:TTS_LOOKAHEAD]:
-        if not _has_speech(text):
+        spoken, _ = substitute.apply(text, rules)
+        if not _has_speech(spoken):
             continue
-        key = _key(text, voice)
+        key = _key(text, voice, spoken)
         if key in _inflight:
             if key in _speculative:
                 _speculative[key].owners.add(owner)
@@ -1145,7 +1161,9 @@ def _read_cache(key: str) -> Optional[dict]:
     # in place — cached audio gets alignment fixes without re-synthesis.
     # (Entries from before "text"/"raw" were stored are served as they are.)
     if meta.get("align") != _ALIGN_VERSION and meta.get("text") and meta.get("raw"):
-        meta["words"] = _align_words(meta["text"], meta["raw"])
+        meta["words"] = substitute.map_words(
+            _align_words(meta["text"], meta["raw"]),
+            [substitute.Edit(*e) for e in meta.get("edits") or []])
         meta["align"] = _ALIGN_VERSION
         tmp_meta = meta_path.with_suffix(".json.tmp")
         tmp_meta.write_text(json.dumps(meta))
@@ -1156,8 +1174,14 @@ def _read_cache(key: str) -> Optional[dict]:
 
 
 def _process_and_store(key: str, text: str, audio_bytes: bytes,
-                       raw_words: List[dict], kbps: Optional[int] = None) -> dict:
+                       raw_words: List[dict], kbps: Optional[int] = None,
+                       edits: Optional[List[substitute.Edit]] = None) -> dict:
     """Build the word map for already-final audio and write the cache entry.
+
+    `text` is what the engine was given. `edits` says how that differs from
+    the text the reader is looking at (substitute.py), and the word map is
+    mapped back over them, so the highlight points at the words on the screen
+    rather than at the words that were spoken.
 
     `audio_bytes` is AUDIO_FORMAT and is what ships to the client — the caller
     has already done any re-encoding, so duration is measured on the exact bytes
@@ -1185,10 +1209,17 @@ def _process_and_store(key: str, text: str, audio_bytes: bytes,
         duration = _mp3_duration(audio_bytes) if AUDIO_FORMAT == "mp3" else 0.0
         words = _estimate_words(text, duration)
 
+    # The engine spoke the substituted text; the reader is looking at the
+    # original. Put the timings back where the reader's words are.
+    words = substitute.map_words(words, edits or [])
+
     # text + raw timestamps ride along (a few hundred bytes next to ~200 KB of
     # audio) so a future _ALIGN_VERSION bump can re-align without re-synthesis.
     meta = {"format": AUDIO_FORMAT, "words": words, "duration": duration,
             "text": text, "raw": raw_words, "align": _ALIGN_VERSION,
+            # The substitutions that made `text` differ from the original,
+            # so a re-align puts the timings back in the right place too.
+            "edits": [list(e) for e in edits] if edits else [],
             # Which encode actually produced this entry — None means Kokoro's
             # own mp3, whether because re-encoding is off or because it failed
             # and we fell back. It has to report what happened rather than what
@@ -1255,7 +1286,8 @@ async def _ask_pocket(text: str, voice: str) -> bytes:
         return resp.content
 
 
-async def _synth_pocket(key: str, text: str, voice: str) -> dict:
+async def _synth_pocket(key: str, text: str, edits: List[substitute.Edit],
+                        voice: str) -> dict:
     if not POCKET_URL:
         raise RuntimeError("Pocket TTS is not configured")
     started = time.monotonic()
@@ -1266,14 +1298,20 @@ async def _synth_pocket(key: str, text: str, voice: str) -> dict:
     audio = await asyncio.get_running_loop().run_in_executor(_ENCODE_POOL, _encode, wav)
     if audio is None:
         raise RuntimeError("Could not encode Pocket TTS audio as MP3")
-    result = await asyncio.to_thread(_process_and_store, key, text, audio, [], AUDIO_BITRATE_KBPS)
+    result = await asyncio.to_thread(_process_and_store, key, text, audio, [],
+                                     AUDIO_BITRATE_KBPS, edits)
     result["_timing"] = (synth_s, time.monotonic() - started - synth_s)
     return result
 
 
 async def _synth_uncached(key: str, text: str, voice: str) -> dict:
+    # The owner's substitutions are applied here, once, so the engine is given
+    # the words that should be spoken and the word map is built against them.
+    # The edits travel with the text so the timings can be put back on the
+    # reader's own words (see _process_and_store).
+    spoken, edits = substitute.plan(text, None, voice)
     if voice in _POCKET_VOICES:
-        return await _synth_pocket(key, text, voice)
+        return await _synth_pocket(key, spoken, edits, voice)
     started = time.monotonic()
     synth_s = 0.0
 
@@ -1281,7 +1319,7 @@ async def _synth_uncached(key: str, text: str, voice: str) -> dict:
         nonlocal synth_s
         requested_at = time.monotonic()
         try:
-            return await _ask_kokoro(text, voice, fmt)
+            return await _ask_kokoro(spoken, voice, fmt)
         finally:
             synth_s += time.monotonic() - requested_at
 
@@ -1326,7 +1364,8 @@ async def _synth_uncached(key: str, text: str, voice: str) -> dict:
         else:
             audio, kbps = encoded, AUDIO_BITRATE_KBPS
 
-    result = await asyncio.to_thread(_process_and_store, key, text, audio, raw_words, kbps)
+    result = await asyncio.to_thread(_process_and_store, key, spoken, audio,
+                                     raw_words, kbps, edits)
     result["_timing"] = (synth_s, time.monotonic() - started - synth_s)
     return result
 
@@ -1379,12 +1418,16 @@ async def synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
     `speed` is accepted for API compatibility but ignored: audio is always
     generated at 1.0× and clients set their player's playback rate instead.
     """
+    # The owner's substitutions, before anything else: the cache key has to
+    # describe the clip that is actually going to be made, and a sentence with
+    # nothing to say is silence whichever way it is written.
+    spoken, _ = substitute.plan(text, None, voice)
     # Before the cache: a divider is the same 676 bytes every time, and asking
     # Kokoro for it is what stalls playback (see _has_speech).
-    if not _has_speech(text):
+    if not _has_speech(spoken):
         return _silence_payload()
 
-    key = _key(text, voice)
+    key = _key(text, voice, spoken)
 
     cached = await asyncio.to_thread(_read_cache, key)
     if cached is not None:
@@ -1407,7 +1450,7 @@ async def synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
 
 def _client_payload(meta: dict) -> dict:
     """The cache entry minus alignment inputs — clients don't need them."""
-    for k in ("text", "raw", "align"):
+    for k in ("text", "raw", "align", "edits"):
         meta.pop(k, None)
     return meta
 

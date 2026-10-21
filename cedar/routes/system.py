@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import __version__, blends, db, lang, settings, tts
+from .. import __version__, blends, db, lang, settings, substitute, tts
 from ..config import SERVER_NAME
 from ..textsafe import printable
 
@@ -210,6 +210,14 @@ def get_server_settings():
 
 @router.put("/settings/server")
 def put_server_settings(body: dict[str, Any]):
+    if "substitutions" in body and body["substitutions"] is not None:
+        # The rules are the one knob whose shape carries meaning, so they are
+        # checked here rather than at synthesis time, when a bad one would be
+        # too late to tell the owner about it.
+        try:
+            body["substitutions"] = substitute.validate(body["substitutions"])
+        except substitute.RulesError as e:
+            raise HTTPException(400, str(e))
     try:
         return settings.update_knobs(body)
     except KeyError as e:

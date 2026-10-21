@@ -398,6 +398,24 @@ curl -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' 
      -d '{"catalog_full": true}' http://localhost:8000/api/settings/server
 ```
 
+### Word substitutions
+
+The voice can be told to say something other than what the text says — for a
+name the G2P mangles, an abbreviation that wants spelling out, or a word the
+owner would rather not hear. The rules are a server knob:
+
+```bash
+curl -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+     -d '{"substitutions": {"en": {"Kokoro": "Koh-KOH-roh"}, "*": {"Mr.": "Mister"}}}' \
+     http://localhost:8000/api/settings/server
+```
+
+The map is `{language: {word: replacement}}`, with `"*"` for the rules that
+hold in every language. Matching is literal and whole-word — `cat` replaces
+`cat` and `Cat`, but not `cats` — and the replacement is spoken verbatim.
+The text on the screen is left alone: only the voice changes, and the word
+highlight still lights the words the reader is looking at.
+
 ## Optional: the book store (public-domain classics)
 
 <img src="docs/img/store.webp" width="230" align="right" alt="The Classics tab: a featured book, Top Books and Fiction shelves">
