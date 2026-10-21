@@ -7,6 +7,7 @@ JSON is the only worker protocol; no executable deserialization is used.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,20 @@ def _worker_command(request: Path, output: Path) -> list[str]:
     return [sys.executable, "-m", "cedar.pdfworker", str(request), str(output)]
 
 
+def _worker_env() -> dict[str, str]:
+    """Keep the worker inside the address-space limit the parser runs under.
+
+    glibc reserves a 64 MiB arena per thread and the native parser starts
+    threads while it loads, so the reservation alone reaches past
+    PDF_MEMORY_BYTES and the worker dies before it reads a page. One arena
+    keeps that reservation small; how much memory the worker may actually
+    use is still bounded by the limit the worker sets for itself.
+    """
+    env = dict(os.environ)
+    env["MALLOC_ARENA_MAX"] = "1"
+    return env
+
+
 def run_pdf(operation: str, path: str, **arguments):
     """Bound the wait, native parsing and response for one PDF operation."""
     if not _slots.acquire(timeout=5):
@@ -43,7 +58,7 @@ def run_pdf(operation: str, path: str, **arguments):
             with subprocess.Popen(_worker_command(request, output),
                                   cwd=str(Path(__file__).resolve().parent.parent),
                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL) as process:
+                                  stderr=subprocess.DEVNULL, env=_worker_env()) as process:
                 try:
                     process.wait(timeout=PDF_TIMEOUT)
                 except subprocess.TimeoutExpired:

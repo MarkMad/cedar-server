@@ -202,6 +202,22 @@ def test_linux_worker_sets_hard_native_limits(monkeypatch, tmp_path):
     assert limits[str(resource.RLIMIT_FSIZE)] == [pdfsafe.PDF_OUTPUT_BYTES] * 2
 
 
+def test_worker_keeps_its_malloc_arena_reservation_small(monkeypatch, tmp_path):
+    """One arena, or the reservation alone reaches past the memory limit.
+
+    glibc reserves an arena per thread and the native parser starts threads
+    while it loads, so the worker has to run with a single arena to stay
+    inside the address-space limit it sets for itself.
+    """
+    def command(request, output):
+        code = ("import json, os, sys; "
+                "open(sys.argv[1], 'w').write(json.dumps({'result': os.environ.get('MALLOC_ARENA_MAX')}))")
+        return [sys.executable, "-c", code, str(output)]
+
+    monkeypatch.setattr(pdfsafe, "_worker_command", command)
+    assert pdfsafe.run_pdf("extract", str(tmp_path / "unused.pdf")) == "1"
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux resource limits")
 def test_linux_memory_limit_blocks_large_native_allocations(monkeypatch, tmp_path):
     script = tmp_path / "memory_worker.py"
