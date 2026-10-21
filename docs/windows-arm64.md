@@ -99,12 +99,16 @@ Hugging Face token are the same on ARM as anywhere else, and the sample server
 runs from the multi-arch Python image. See the README, "Cloned voices: your own
 recordings".
 
-On ARM, Pocket's int8 quantization runs on the QNNPACK backend: `torchao` publishes no
-ARM64 wheels, so Pocket falls back to PyTorch's own quantized engine. The `pocket`
-profile is what keeps the container out of the default ARM stack. Without
-`--profile pocket`, Compose reports that `cedar` depends on an undefined `pocket`
-service, so keep the flag for later commands as well — `ps`, `logs`, and `down` all need
-the same file list.
+The ARM64 profile's default Pocket engine is the Rust one (`CEDAR_POCKET_IMPL=rust`),
+upstream's standalone binary: a ~25 MB build on glibc rather than the Python engine's
+gigabytes of wheels, and a much quicker first start. aarch64 has no AVX2 floor, so the
+binary runs as built. Set `CEDAR_POCKET_IMPL=python` in `.env` to go back to the
+PyTorch engine — on ARM, its int8 quantization runs on the QNNPACK backend:
+`torchao` publishes no ARM64 wheels, so the Python engine falls back to PyTorch's
+own quantized engine. The `pocket` profile is what keeps the container out of the
+default ARM stack. Without `--profile pocket`, Compose reports that `cedar` depends
+on an undefined `pocket` service, so keep the flag for later commands as well — `ps`,
+`logs`, and `down` all need the same file list.
 
 Give both engines room and keep some for Windows. The Snapdragon X2 Plus comes in a
 6-core and a 10-core part, and the ARM64 profile caps Kokoro at 3 cores by default

@@ -1,4 +1,19 @@
-FROM python:3.12-slim
+# Pocket TTS, the optional voice engine behind the Compose override.
+#
+# POCKET_IMPL chooses what the image contains:
+#   python -- the PyPI engine Cedar has always talked (several GiB of PyTorch).
+#   rust   -- upstream's standalone binary, ~25 MB on plain glibc, same
+#             /tts contract. Its x86-64 build needs AVX2 (the entrypoint
+#             checks); aarch64 asks nothing special of the host.
+#
+# The variant, model and release are build args the Compose override threads
+# from .env (CEDAR_POCKET_IMPL, CEDAR_POCKET_MODEL, CEDAR_POCKET_VERSION) into
+# the image tag, the container's "--language" setting, and Cedar's own cache
+# prefix — so both sides of one deployment always describe the same engine,
+# and reusing the wrong one's cached audio is impossible by construction.
+ARG POCKET_IMPL=python
+FROM python:3.12-slim AS python
+ARG POCKET_VERSION=4.0.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
     && rm -rf /var/lib/apt/lists/* \
@@ -8,12 +23,59 @@ RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
     && chown -R pocket:pocket /home/pocket/.cache
 
 # Use the CPU PyTorch wheels; the default Linux wheel set also downloads CUDA.
-RUN pip install --no-cache-dir pocket-tts==3.3.0 --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir pocket-tts==${POCKET_VERSION} --extra-index-url https://download.pytorch.org/whl/cpu
 
 COPY pocket-entrypoint.sh /usr/local/bin/pocket-entrypoint
 RUN chmod 0755 /usr/local/bin/pocket-entrypoint /home/pocket /home/pocket/.cache
 ENV HOME=/home/pocket XDG_CACHE_HOME=/home/pocket/.cache HF_HOME=/home/pocket/.cache/huggingface
+# Image-internal marker the entrypoint keys on. Not a user setting: the
+# CEDAR_POCKET_IMPL the Compose override hands Cedar cannot change what this
+# image actually is.
+ENV POCKET_IMPL=python
 ENTRYPOINT ["/usr/local/bin/pocket-entrypoint"]
 
 EXPOSE 8000
 CMD ["pocket-tts", "serve", "--host", "0.0.0.0"]
+
+# The standalone binary, extracted under /usr/local and made reachable as
+# plain "pocket-tts" so the entrypoint and CMD are shared with the python stage.
+FROM debian:bookworm-slim AS rust
+ARG POCKET_VERSION=4.0.0
+ARG TARGETARCH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 pocket \
+    && useradd --uid 1000 --gid pocket --create-home --shell /usr/sbin/nologin pocket \
+    && mkdir -p /home/pocket/.cache/pocket_tts /home/pocket/.cache/huggingface \
+    && chown -R pocket:pocket /home/pocket/.cache
+
+# Upstream attaches the binary to the GitHub release, but its asset names still
+# carry the Rust crate's older "3.3.0" version string — derive nothing from the
+# tag, and verify the download against the release's SHA256SUMS.
+RUN case "$TARGETARCH" in \
+      amd64) asset=pocket-tts-3.3.0-x86_64-unknown-linux-gnu.tar.gz ;; \
+      arm64) asset=pocket-tts-3.3.0-aarch64-unknown-linux-gnu.tar.gz ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && release="https://github.com/kyutai-labs/pocket-tts/releases/download/v${POCKET_VERSION}" \
+    && curl -fsSL -o /tmp/pocket.tar.gz "$release/$asset" \
+    && curl -fsSL -o /tmp/SHA256SUMS "$release/SHA256SUMS" \
+    && (cd /tmp && grep -F "  ${asset}" SHA256SUMS | sha256sum -c -) \
+    && tar -xzf /tmp/pocket.tar.gz -C /usr/local \
+    && ln -s /usr/local/pocket-tts-*/pocket-tts /usr/local/bin/pocket-tts \
+    && rm -rf /tmp/pocket.tar.gz /tmp/SHA256SUMS
+
+COPY pocket-entrypoint.sh /usr/local/bin/pocket-entrypoint
+RUN chmod 0755 /usr/local/bin/pocket-entrypoint /home/pocket /home/pocket/.cache
+ENV HOME=/home/pocket XDG_CACHE_HOME=/home/pocket/.cache HF_HOME=/home/pocket/.cache/huggingface
+ENV POCKET_IMPL=rust
+ENTRYPOINT ["/usr/local/bin/pocket-entrypoint"]
+
+EXPOSE 8000
+CMD ["pocket-tts", "serve", "--host", "0.0.0.0"]
+
+# Pick the stage that was built. Blurbs above belong to each stage, so nothing
+# is duplicated here.
+FROM ${POCKET_IMPL}

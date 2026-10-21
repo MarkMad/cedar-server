@@ -155,6 +155,40 @@ prepare audio as fast as the VM generates it, so some pauses may remain if
 inference takes longer than playback. The CPU limits are ceilings, not reserved cores.
 Pocket live reading also begins warming the first few lines as soon as Cedar receives
 the captured page, before the app requests speech for each line.
+
+#### Engine and model
+
+Two `.env` values choose what works behind the voices — and each one changes
+how Pocket sounds, so Cedar keys its audio cache on them and a switch
+re-synthesizes the Pocket clips.
+
+**The engine** (`CEDAR_POCKET_IMPL`, default `python`). The Python image is
+the PyTorch engine upstream packages, and runs on any x86-64 or ARM64 host.
+The `rust` image instead carries upstream's standalone binary — the same
+`/tts` API in about 25 MB on plain glibc, instead of gigabytes of wheels, and
+quicker to start. Its x86-64 build needs AVX2 (Intel Haswell, AMD Zen or newer)
+and cannot run on a CPU without them: the container checks and refuses with a
+clear message, so an N5105-side box stays on the Python engine. An aarch64
+host needs nothing special, so the ARM64 profile runs the Rust engine unless
+you set `CEDAR_POCKET_IMPL=python` yourself.
+
+**The model** (`CEDAR_POCKET_MODEL`, default `english`). Pocket's server runs
+one model for every voice, and upstream ships a family of small and faster
+English ones alongside the default: `english_18m_2026-10`, `english_7m_2026-10`
+and `english_2m_2026-10` (each also in a `_refl` variant). The small models
+prepare audio clearly faster on a CPU, at the cost of faithfulness: they
+sharpen sibilants noticeably, stop sentences a touch sooner, and carry more
+variation between retakes — their threshold for ending a word is looser than
+the default model's. On a slow box choose `english_7m_2026-10` and compare
+against `english` before settling.
+
+The pinned release (`CEDAR_POCKET_VERSION`) is a third engine knob, kept in
+step with `Dockerfile.pocket`'s build args by the compose override; leave it
+alone unless you bump the pin yourself. After any change of these three,
+run the engine contract probe (`tools/pocket_contract_probe.py`) against the
+live engine to confirm its transport and audio shape still match what Cedar
+expects; the probe's header shows how to call it. It needs Python 3 and
+nothing else.
 On Snapdragon / Windows on Arm, the same override works next to the ARM64 profile; see
 the [ARM64 guide](docs/windows-arm64.md#3-optional-pocket-tts-voices) for the command.
 To return to the standard setup:

@@ -44,3 +44,30 @@ def test_pocket_audio_is_encoded_and_highlighted(monkeypatch, tmp_path):
 
 def test_pocket_cache_does_not_reuse_kokoro_audio():
     assert tts._key("Hello there", "af_pocket_alba") != tts._key("Hello there", "af_heart")
+
+
+def test_pocket_cache_key_names_the_engine(monkeypatch):
+    """Pocket v4's identity is part of the key.
+
+    Upstream changes audio across releases (v4.0.0 re-recorded the
+    embeddings), across models (the small english_* models ship their own)
+    and across implementations (the Rust server draws different noise). A
+    cached clip must never be served for the engine from which it did not
+    come, so every identity knob has to change the key.
+    """
+    text, voice = "Hello there", "af_pocket_alba"
+    kokoro = tts._key(text, "af_heart")
+    monkeypatch.setattr(tts, "POCKET_IMPL", "rust")
+    monkeypatch.setattr(tts, "POCKET_MODEL", "english_7m_2026-10")
+    monkeypatch.setattr(tts, "POCKET_VERSION", "4.0.0")
+    rust = tts._key(text, voice)
+    monkeypatch.setattr(tts, "POCKET_IMPL", "python")
+    python = tts._key(text, voice)
+    monkeypatch.setattr(tts, "POCKET_MODEL", "english_2m_2026-10")
+    small = tts._key(text, voice)
+    monkeypatch.setattr(tts, "POCKET_VERSION", "4.1.0")
+    bumped = tts._key(text, voice)
+
+    assert len({rust, python, small, bumped}) == 4
+    # A Kokoro voice stays keyed as it always was, untouched by any of it.
+    assert tts._key(text, "af_heart") == kokoro
