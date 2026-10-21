@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import subprocess
 import tempfile
 import time
@@ -777,12 +778,35 @@ def _align_words(text: str, words: List[dict]) -> List[dict]:
 _TRANSPORT_CLOSE_TIMEOUT = 5.0
 _transport_closers: set[asyncio.Task] = set()
 
+_ssl_context: Optional[ssl.SSLContext] = None
+
+
+def _shared_ssl_context() -> ssl.SSLContext:
+    """One trust store load for every client.
+
+    httpx builds an SSL context per client, which reads and parses the whole
+    certificate bundle. On Windows that costs a quarter of a second, and the
+    client is built on the event loop, so every synthesis stalls the loop for
+    it. The trust store does not change while the process runs, so the
+    context is built once and shared.
+    """
+    global _ssl_context
+    if _ssl_context is None:
+        _ssl_context = httpx.create_ssl_context()
+    return _ssl_context
+
 
 def _new_synthesis_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         timeout=httpx.Timeout(TTS_TIMEOUT, pool=min(1.0, TTS_TIMEOUT)),
         limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        verify=_shared_ssl_context(),
     )
+
+
+def warm_transport() -> None:
+    """Build the shared trust store before the first request needs it."""
+    _shared_ssl_context()
 
 
 async def _close_synthesis_client(client: httpx.AsyncClient) -> None:

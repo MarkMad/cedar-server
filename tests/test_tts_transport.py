@@ -2,19 +2,24 @@
 import asyncio
 import base64
 import json
+import ssl
 import struct
 from contextlib import asynccontextmanager
 
 import httpx
 import pytest
 
-from cedar import tts
+from cedar import main, tts
 
 _synthesize = tts.synthesize
 VOICE = "af_pocket_alba"
 PCM = b"\0\0" * 4096
 WAV = (b"RIFF" + struct.pack("<I", 2_000_000_036) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16,
        1, 1, 24000, 48000, 2, 16) + b"data" + struct.pack("<I", 2_000_000_000) + PCM)
+# httpx builds an SSL context per client, which reads the whole certificate
+# bundle and blocks the loop while it does. One context for the module keeps
+# the timings below about the transport rather than about the trust store.
+_SSL_CONTEXT = httpx.create_ssl_context()
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +90,7 @@ async def voice_server(monkeypatch, *, first="stream", trickle=False):
     def client_factory():
         client = httpx.AsyncClient(timeout=httpx.Timeout(1, pool=0.05),
                                    limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
-                                   trust_env=False)
+                                   trust_env=False, verify=_SSL_CONTEXT)
         clients.append(client)
         return client
 
@@ -150,6 +155,10 @@ def test_real_buffered_trickle_hits_total_deadline_then_next_job_succeeds(monkey
                 await asyncio.wait_for(_synthesize("Trickling sentence", "af_heart"), 1)
             await asyncio.wait_for(disconnected.wait(), 1)
             await settle()
+            # The deadline that trips the trickling job is deliberately tiny.
+            # The next job has to succeed under an ordinary deadline; it must
+            # not inherit the budget of the job that just expired.
+            monkeypatch.setattr(tts, "TTS_TIMEOUT", 2)
             assert (await _synthesize("Next sentence", "af_heart"))["audio_b64"] == "audio"
             assert len(calls) == len(clients) == 2
             assert all(client.is_closed for client in clients)
@@ -274,3 +283,61 @@ def test_status_format_fallback_is_preserved_within_one_total_deadline(monkeypat
         assert len(clients) == 2 and all(client.is_closed for client in clients)
         await settle()
     asyncio.run(run())
+
+
+def _count_bundle_reads(monkeypatch) -> list:
+    """Count how often the certificate bundle is parsed."""
+    reads = []
+    real_default_context = ssl.create_default_context
+
+    def counting_default_context(*args, **kwargs):
+        reads.append(1)
+        return real_default_context(*args, **kwargs)
+
+    monkeypatch.setattr(ssl, "create_default_context", counting_default_context)
+    return reads
+
+
+def test_one_trust_store_serves_every_client(monkeypatch):
+    """Building clients must not re-read the certificate bundle.
+
+    httpx builds an SSL context per client, which parses the whole CA
+    bundle and blocks the event loop while it does. The module keeps one
+    context, so the bundle is read once for the life of the process.
+    """
+    monkeypatch.setattr(tts, "_ssl_context", None)
+    reads = _count_bundle_reads(monkeypatch)
+
+    first = tts._shared_ssl_context()
+    assert tts._shared_ssl_context() is first
+
+    async def run():
+        clients = [tts._new_synthesis_client() for _ in range(3)]
+        for client in clients:
+            await client.aclose()
+
+    asyncio.run(run())
+    assert len(reads) == 1
+
+
+def test_startup_builds_the_trust_store_before_the_first_request(monkeypatch):
+    """The first sentence must not pay for the trust store.
+
+    The bundle is parsed at startup, off the event loop, so the first
+    synthesis does not stall the loop while the certificates are read.
+    """
+    monkeypatch.setattr(main.db, "init_db", lambda: None)
+    monkeypatch.setattr(main.settings, "init_tables", lambda: None)
+    monkeypatch.setattr(main.dictionary, "init_tables", lambda: None)
+    monkeypatch.setattr(main.translate, "init_tables", lambda: None)
+    monkeypatch.setattr(main.auth, "load_key", lambda: None)
+    monkeypatch.setattr(tts, "_ssl_context", None)
+    reads = _count_bundle_reads(monkeypatch)
+
+    async def run():
+        async with main._lifespan(main.app):
+            pass
+
+    asyncio.run(run())
+    assert len(reads) == 1
+    assert tts._ssl_context is not None

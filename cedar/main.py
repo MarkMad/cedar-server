@@ -14,6 +14,7 @@ not a 404 — tells an unauthenticated peer what is here.
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import time
@@ -70,6 +71,9 @@ async def _lifespan(app: FastAPI):
     dictionary.init_tables()
     translate.init_tables()
     auth.load_key()
+    # The trust store is read once and shared by every synthesis client; do it
+    # here so the first sentence does not pay for it on the request path.
+    await asyncio.to_thread(tts.warm_transport)
     logging.getLogger("cedar").info("cedar-server %s ready (schema v%d, data in %s)",
                                     __version__, db.schema_version(), DATA_DIR)
     try:
