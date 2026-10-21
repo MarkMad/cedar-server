@@ -166,6 +166,66 @@ docker compose up -d
 
 Do not add `-v` to `down`: the named volumes hold Cedar's library and key.
 
+#### Cloned voices: your own recordings
+
+Pocket can clone a voice from a short recording, so a voice can be someone the
+built-in list does not have. Two things are needed.
+
+**The model weights that can clone.** They are gated on Hugging Face: accept
+the terms at [huggingface.co/kyutai/pocket-tts](https://huggingface.co/kyutai/pocket-tts),
+create a read token, and put it in `.env`:
+
+```bash
+HF_TOKEN=hf_...
+```
+
+Without a token Pocket runs the model that cannot clone, and every attempt to
+speak with a cloned voice fails. Its built-in voices keep working.
+
+**The recordings.** Put them in `voices/` next to the compose files, and name
+them in `voices/manifest.json` (copy `voices/manifest.example.json` to start):
+
+```json
+{
+  "narrator": { "id": "af_pocket_narrator", "file": "narrator.wav" }
+}
+```
+
+The id decides how the voice is grouped and named: `af_`/`am_`/`bf_`/`bm_` is
+the language and gender, and the picker calls it "Pocket Narrator". The file
+is a 16-bit PCM WAV of one speaker — about ten to twenty seconds of clean
+speech. 24-bit and float WAVs are not read by Pocket's image, and a recording
+longer than the speech it needs is encoded in full, so keep it short. The
+sample's quality is what you hear, so a noisy recording gives a noisy voice.
+Both the recordings and the manifest stay on this machine (`voices/.gitignore`);
+only the container that speaks them sees them.
+
+Then start the stack as above. The Pocket container fetches each sample over
+the Compose network, so nothing is published to your LAN, and the voice shows
+up in the app's picker next to the built-in Pocket voices. Cedar reads the
+manifest when it starts, so restart it after adding or renaming a voice.
+
+Pocket keeps only two voices in memory at a time and re-encodes a recording
+whenever it switches away from it, which is a pause you can hear. Converting
+the recordings once — the model is loaded once per file, so this is slow the
+first time and never again — turns a switch into a file read:
+
+```bash
+mkdir -p voices/exported
+for f in voices/*.wav; do
+  n=$(basename "$f" .wav)
+  docker compose -f docker-compose.pocket.yml run --rm --no-deps \
+    -v ./voices:/voices pocket \
+    pocket-tts export-voice "/voices/$n.wav" "/voices/exported/$n.safetensors"
+done
+```
+
+Point the manifest at `exported/narrator.safetensors` afterwards and restart
+Cedar. The exported files are written by the container's own user, so on
+Linux they belong to uid 1000 rather than to you. A cloned voice is a Pocket
+voice in every other respect: it has no word timestamps, so its highlight is
+estimated the same way.
+
 ### Voice blends
 
 Kokoro can average two voices into one, so Cedar offers a few blends in the voice

@@ -1,0 +1,4 @@
+{
+  "narrator": { "id": "af_pocket_narrator", "file": "narrator.wav" },
+  "grandpa": { "id": "am_pocket_grandpa", "file": "grandpa.wav" }
+}

@@ -1,0 +1,6 @@
+# Your own voice samples stay on this machine: they are recordings of real
+# people, and they are yours to keep. Copy manifest.example.json to
+# manifest.json to name them.
+*.wav
+*.safetensors
+manifest.json

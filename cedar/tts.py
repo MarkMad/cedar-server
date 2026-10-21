@@ -44,15 +44,17 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import anyio
 import httpx
 
 from . import blends, substitute
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_CACHE_GB, AUDIO_DIR, AUDIO_FORMAT,
-                     AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_URL, TTS_CONCURRENCY,
-                     TTS_LOOKAHEAD, TTS_TIMEOUT)
+                     AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_URL, POCKET_VOICE_BASE,
+                     POCKET_VOICES_DIR, TTS_CONCURRENCY, TTS_LOOKAHEAD, TTS_TIMEOUT)
 from .pocket_stream import wav_pcm
 
 _CACHE = AUDIO_DIR / "cache"
@@ -570,6 +572,89 @@ _POCKET_VOICES = {
     "am_pocket_marius": "marius",
     "am_pocket_jean": "jean",
 }
+
+# The owner's own voices: recordings they supply, cloned by Pocket.
+#
+# Pocket's /tts takes a voice URL, not a path, so a sample has to be
+# reachable by URL from inside the Pocket container. The Compose override
+# serves the samples folder over the internal network and points
+# CEDAR_POCKET_VOICE_BASE at it; manifest.json in that folder names each
+# sample and the Cedar voice id it becomes.
+#
+# A cloned voice is a Pocket voice in every respect: it goes in the table
+# above, so it takes the same synthesis path, the same stream and the same
+# cache prefix as the built-in ones. Its id has to carry "pocket_" because
+# the cache is keyed by voice id — a cloned voice called "af_heart" would
+# collide with Kokoro's and serve the wrong audio.
+_CLONED_ID = re.compile(r"^[a-z][fm]_pocket_[a-z0-9_]+$")
+# A file name, optionally in a subfolder (exported voices live in one), and
+# never a path that climbs out of the samples folder.
+_CLONED_FILE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*\.(?:wav|safetensors)$")
+
+
+def _cloned_voices(directory: str, base: str) -> Dict[str, str]:
+    """The owner's cloned voices: {Cedar voice id: the URL Pocket fetches}.
+
+    manifest.json in the samples folder maps a name to the voice id and the
+    file it speaks with: {"narrator": {"id": "af_pocket_narrator",
+    "file": "narrator.wav"}}. A bad entry is skipped with a warning rather
+    than fatal: one broken line must not cost the owner the voices that do
+    work.
+    """
+    if not directory or not base:
+        return {}
+    folder = Path(directory)
+    manifest_path = folder / "manifest.json"
+    try:
+        raw = manifest_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        log.warning("cloned voices: cannot read %s (%s)", manifest_path, exc)
+        return {}
+    try:
+        manifest = json.loads(raw)
+    except ValueError as exc:
+        log.warning("cloned voices: %s is not valid JSON (%s)", manifest_path, exc)
+        return {}
+    if not isinstance(manifest, dict):
+        log.warning("cloned voices: %s must be an object", manifest_path)
+        return {}
+    out: Dict[str, str] = {}
+    for name, entry in manifest.items():
+        if not isinstance(entry, dict):
+            log.warning("cloned voices: %r is not an entry", name)
+            continue
+        voice = entry.get("id")
+        filename = entry.get("file")
+        if not isinstance(voice, str) or not _CLONED_ID.match(voice):
+            log.warning("cloned voices: %r has no usable id (%r)", name, voice)
+            continue
+        if voice in _POCKET_VOICES:
+            log.warning("cloned voices: %r is already a voice (%s)", name, voice)
+            continue
+        if not isinstance(filename, str) or not _CLONED_FILE.match(filename):
+            log.warning("cloned voices: %r has no usable file (%r)", name, filename)
+            continue
+        path = (folder / filename).resolve()
+        if not path.is_relative_to(folder.resolve()) or not path.is_file():
+            log.warning("cloned voices: %r points at a missing file (%s)", name, filename)
+            continue
+        out[voice] = f"{base}/{quote(filename)}"
+    return out
+
+
+def _register_cloned_voices() -> Dict[str, str]:
+    """Add the owner's cloned voices to the Pocket voice table."""
+    voices = _cloned_voices(POCKET_VOICES_DIR, POCKET_VOICE_BASE)
+    if voices:
+        log.info("cloned voices: %s", ", ".join(sorted(voices)))
+    _POCKET_VOICES.update(voices)
+    return voices
+
+
+_register_cloned_voices()
 
 
 def _key(text: str, voice: str, spoken: Optional[str] = None) -> str:

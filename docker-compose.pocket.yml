@@ -13,6 +13,11 @@ services:
     environment:
       OMP_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
+      # The model weights that can clone a voice are gated on Hugging Face:
+      # accept the terms at huggingface.co/kyutai/pocket-tts and put a read
+      # token in .env. Without it Pocket runs the model that cannot clone,
+      # and only its built-in voices speak.
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - pocket-cache:/home/pocket/.cache/pocket_tts
       - pocket-hf-cache:/home/pocket/.cache/huggingface
@@ -26,12 +31,37 @@ services:
       - SETGID
       - SETPCAP
 
+  # Serves the owner's own voice samples to the Pocket container, which
+  # fetches them by URL — Pocket's /tts takes a voice URL, not a path.
+  # Internal to the Compose network: no port is published, so the samples
+  # never reach the LAN. See README, "Cloned voices".
+  voicefiles:
+    image: python:3.12-alpine
+    command: ["python", "-m", "http.server", "8000", "--bind", "0.0.0.0", "--directory", "/voices"]
+    volumes:
+      - ./voices:/voices:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   cedar:
     environment:
       CEDAR_POCKET_URL: http://pocket:8000
       CEDAR_TTS_LOOKAHEAD: ${CEDAR_TTS_LOOKAHEAD:-6}
+      # The owner's cloned voices: where the samples and their manifest live,
+      # and the URL the Pocket container fetches a sample from.
+      CEDAR_POCKET_VOICES_DIR: /voices
+      CEDAR_POCKET_VOICE_BASE: http://voicefiles:8000
+    volumes:
+      - ./voices:/voices:ro
     depends_on:
       - pocket
+      - voicefiles
 
 volumes:
   pocket-cache:

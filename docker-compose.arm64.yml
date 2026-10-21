@@ -29,3 +29,9 @@ services:
     profiles: ["pocket"]
     platform: linux/arm64
     image: cedar-pocket-tts:arm64
+
+  # Serves the owner's own voice samples to Pocket. Same profile as pocket,
+  # so it stays out of the default ARM stack.
+  voicefiles:
+    profiles: ["pocket"]
+    platform: linux/arm64

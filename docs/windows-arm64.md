@@ -94,6 +94,11 @@ timing from the finished audio, so the highlight is approximate. Cedar encodes P
 WAV response to MP3 with `lame`, which the standard Cedar image already includes. If
 Pocket is unavailable, the Kokoro voices still work.
 
+Your own recordings work here too: the `voices/` folder, the manifest, and the
+Hugging Face token are the same on ARM as anywhere else, and the sample server
+runs from the multi-arch Python image. See the README, "Cloned voices: your own
+recordings".
+
 On ARM, Pocket's int8 quantization runs on the QNNPACK backend: `torchao` publishes no
 ARM64 wheels, so Pocket falls back to PyTorch's own quantized engine. The `pocket`
 profile is what keeps the container out of the default ARM stack. Without

@@ -23,6 +23,12 @@ for d in (DATA_DIR, UPLOAD_DIR, AUDIO_DIR, MEDIA_DIR):
 KOKORO_URL = os.environ.get("CEDAR_KOKORO_URL", "http://localhost:8880").rstrip("/")
 # Empty unless the optional Pocket TTS Compose override is in use.
 POCKET_URL = os.environ.get("CEDAR_POCKET_URL", "").rstrip("/")
+# The owner's own voice samples: the folder holding them and the manifest
+# that names them, and the URL the Pocket container fetches a sample from.
+# Pocket's /tts takes a voice URL, not a path, so a sample has to be
+# reachable by URL from inside the Pocket container.
+POCKET_VOICES_DIR = os.environ.get("CEDAR_POCKET_VOICES_DIR", "").strip()
+POCKET_VOICE_BASE = os.environ.get("CEDAR_POCKET_VOICE_BASE", "").rstrip("/")
 
 # The owner key. Every /api/* request except /api/health must present it. Empty
 # here means "generate one on first start and keep it in KEY_PATH" (see auth.py).
