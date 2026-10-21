@@ -63,6 +63,29 @@ keys, or runtime data. Preserve the deny-by-default owner-key gate, SSRF-safe
 fetching, and request-size limits. Back up SQLite before applying migrations or
 rechunking existing documents, and preserve annotation anchors and audio caches.
 
+## Change authorization
+
+Only make the edits the request covers. Everything else needs permission first.
+
+- A question is not authorization to change code. "Why is this error happening?"
+  is answered with an explanation; the fix is made when the user asks for it.
+- Before editing a file the request did not cover, stop and ask. Say what you
+  would change, in which files, and why, then wait for an answer.
+- In scope without further asking: the requested change, the files it needs,
+  and a regression test for the behavior it changes.
+- Out of scope without asking: unrelated failing tests, other modules, refactors
+  near the change, formatting, and dependency or configuration edits. Report
+  them instead — a separate failure found while working is not a licence to
+  start fixing it.
+- Investigation needs no permission. Reading files, searching, running tests
+  and read-only diagnostics are always fine; only writes need approval.
+- Work already done that the request did not cover must be reported plainly,
+  with the files changed, and offered for revert — not folded into the next
+  commit and not quietly left in the tree.
+
+This applies to delegated work too: a sub-agent brief authorizes only what the
+brief names.
+
 ## Delegate tasks
 
 The main agent orchestrates delegated work and remains responsible for
