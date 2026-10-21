@@ -29,3 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: docker build -t cedar-server:ci .
+      # Both Pocket variants build on each runner: the PyPI engine, and the
+      # standalone binary, whose aarch64 asset is fetched on the ARM runner.
+      - run: docker build -f Dockerfile.pocket -t cedar-pocket-python:ci .
+      - run: docker build -f Dockerfile.pocket --build-arg POCKET_IMPL=rust -t cedar-pocket-rust:ci .

@@ -30,6 +30,20 @@ POCKET_URL = os.environ.get("CEDAR_POCKET_URL", "").rstrip("/")
 POCKET_VOICES_DIR = os.environ.get("CEDAR_POCKET_VOICES_DIR", "").strip()
 POCKET_VOICE_BASE = os.environ.get("CEDAR_POCKET_VOICE_BASE", "").rstrip("/")
 
+# Which Pocket build the deployed engine runs. The Compose override feeds the
+# same three values to the container (its build, its --language flag) and to
+# Cedar, so a .env edit flips both sides together: Pocket's audio is not
+# interchangeable across them. v4.0.0 re-recorded the predefined voice
+# embeddings and changed the model behind the default "english" language, the
+# small English models (--language english_18m/7m/2m_2026-10) ship their own
+# audio, and the Rust image draws different noise from the Python one — the
+# cache prefix encodes all three so none of it can serve stale clips.
+# POCKET_VERSION is the pinned upstream release, not the asset's filename
+# (upstream's Rust binary still carries a 3.3.0 version string in v4.0.0).
+POCKET_VERSION = os.environ.get("CEDAR_POCKET_VERSION", "4.0.0").strip() or "4.0.0"
+POCKET_IMPL = os.environ.get("CEDAR_POCKET_IMPL", "python").strip().lower() or "python"
+POCKET_MODEL = os.environ.get("CEDAR_POCKET_MODEL", "english").strip() or "english"
+
 # The owner key. Every /api/* request except /api/health must present it. Empty
 # here means "generate one on first start and keep it in KEY_PATH" (see auth.py).
 CEDAR_KEY = os.environ.get("CEDAR_KEY", "").strip()

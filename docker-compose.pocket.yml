@@ -1,18 +1,46 @@
 # Add Pocket voices to Cedar while retaining Kokoro for its other languages.
 # docker compose -f docker-compose.yml -f docker-compose.pocket.yml up -d --build
+#
+# The engine is chosen in .env: CEDAR_POCKET_IMPL picks what the image is
+# ("python" or "rust", see Dockerfile.pocket) and CEDAR_POCKET_MODEL which
+# model speaks ("english" or one of the small English models, listed at the
+# command line below). Both values also reach Cedar's environment below, so a
+# cached clip always belongs to the engine that produced it. Release note:
+# a first change from the previous 3.3.0 image re-fills Pocket's cache (the
+# audio itself changed upstream); Cedar's own Pocket clips re-synthesize too,
+# by design — the cache prefix carries the engine identity for exactly that.
 services:
   pocket:
     build:
       context: .
       dockerfile: Dockerfile.pocket
-    image: cedar-pocket-tts:latest
+      args:
+        POCKET_IMPL: ${CEDAR_POCKET_IMPL:-python}
+        POCKET_VERSION: ${CEDAR_POCKET_VERSION:-4.0.0}
+    # The tag names the variant and model, so the two can coexist on one host.
+    image: cedar-pocket-tts:${CEDAR_POCKET_IMPL:-python}-${CEDAR_POCKET_MODEL:-english}
     cpus: ${CEDAR_POCKET_CPUS:-2}
     restart: unless-stopped
-    # Int8 inference reduces work on x86 CPUs such as the N5105.
-    command: ["pocket-tts", "serve", "--host", "0.0.0.0", "--quantize"]
+    command:
+      - pocket-tts
+      - serve
+      - --host
+      - 0.0.0.0
+      # One model per deployment. "english" is the default (full) model; the
+      # small and faster English models are english_18m_2026-10,
+      # english_7m_2026-10 and english_2m_2026-10, each also with a _refl
+      # variant. They are smaller and sharper-sounding than the default; the
+      # small ones also stop sentences a touch sooner, and voices vary more.
+      - --language
+      - ${CEDAR_POCKET_MODEL:-english}
+      # Int8 inference reduces work on x86 CPUs such as the N5105.
+      - --quantize
     environment:
-      OMP_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
+      # Engine thread caps, sized to the same default ceiling of 2 cores.
+      # RAYON_NUM_THREADS applies to the Rust engine, OMP/MKL to the Python one.
+      OMP_NUM_THREADS: ${CEDAR_POCKET_CPUS:-2}
+      MKL_NUM_THREADS: ${CEDAR_POCKET_CPUS:-2}
+      RAYON_NUM_THREADS: ${CEDAR_POCKET_CPUS:-2}
       # The model weights that can clone a voice are gated on Hugging Face:
       # accept the terms at huggingface.co/kyutai/pocket-tts and put a read
       # token in .env. Without it Pocket runs the model that cannot clone,
@@ -53,6 +81,12 @@ services:
     environment:
       CEDAR_POCKET_URL: http://pocket:8000
       CEDAR_TTS_LOOKAHEAD: ${CEDAR_TTS_LOOKAHEAD:-6}
+      # What is above is below here too: the engine identity, so a cache key
+      # can name the Pocket build that produced the clip. Set in .env and
+      # nothing here changes; the variables already carry the same defaults.
+      CEDAR_POCKET_IMPL: ${CEDAR_POCKET_IMPL:-python}
+      CEDAR_POCKET_MODEL: ${CEDAR_POCKET_MODEL:-english}
+      CEDAR_POCKET_VERSION: ${CEDAR_POCKET_VERSION:-4.0.0}
       # The owner's cloned voices: where the samples and their manifest live,
       # and the URL the Pocket container fetches a sample from.
       CEDAR_POCKET_VOICES_DIR: /voices

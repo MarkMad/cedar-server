@@ -16,6 +16,11 @@ services:
   cedar:
     platform: linux/arm64
     image: cedar-server:arm64
+    environment:
+      # ARM64 has no AVX2 floor, so this profile runs Pocket on the Rust
+      # engine unless the owner picked otherwise; the pocket override supplies
+      # all other Cedar-side values, and these two must not drift apart.
+      CEDAR_POCKET_IMPL: ${CEDAR_POCKET_IMPL:-rust}
 
   classics:
     platform: linux/arm64
@@ -25,10 +30,15 @@ services:
   # name like the other services. The profile keeps it out of the default ARM
   # stack; docker-compose.pocket.yml is required alongside it and supplies the
   # build, volumes, CPUs, quantization, and the Cedar side of the link.
+  # aarch64 has no AVX2 floor, so the Rust engine — 25 MB on plain glibc
+  # instead of the Python engine's GiB of wheels — is the default here.
   pocket:
     profiles: ["pocket"]
     platform: linux/arm64
     image: cedar-pocket-tts:arm64
+    build:
+      args:
+        POCKET_IMPL: ${CEDAR_POCKET_IMPL:-rust}
 
   # Serves the owner's own voice samples to Pocket. Same profile as pocket,
   # so it stays out of the default ARM stack.
