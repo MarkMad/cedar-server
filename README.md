@@ -265,11 +265,13 @@ over.
 PDF imports, cover rendering and highlighting run in disposable worker processes.
 At most two workers run together, each with a 30-second deadline and a 32 MiB
 result limit. Linux workers also have a 768 MiB address-space limit and a CPU
-time limit. PDF imports accept at most 2,000 pages and 16 MiB of extracted text;
-documents above these limits are rejected. Other operating systems retain the
-process, deadline, concurrency and output limits, but lack the Linux memory cap.
-Pocket drops to an unprivileged user before serving; existing model-cache volumes
-are reused and their ownership is adjusted on first start after this update.
+time limit, and run with a single malloc arena so the parser's own threads
+cannot reserve their way past that limit before it reads a page. PDF imports
+accept at most 2,000 pages and 16 MiB of extracted text; documents above these
+limits are rejected. Other operating systems retain the process, deadline,
+concurrency and output limits, but lack the Linux memory cap. Pocket drops to an
+unprivileged user before serving; existing model-cache volumes are reused and
+their ownership are adjusted on first start after this update.
 Authenticated thumbnail responses allow only private client caching. If a proxy
 cached thumbnails before this update, purge those existing cached responses.
 
