@@ -149,7 +149,7 @@ work. Switching voices generates separate cached audio.
 
 On a four-core DietPi VM, start with `CEDAR_TTS_CONCURRENCY=1`,
 `CEDAR_KOKORO_CPUS=3`, and the override's default
-`CEDAR_POCKET_CPUS=2`. The Pocket setup uses int8 inference and prepares up to
+`CEDAR_POCKET_CPUS=2`. The Pocket setup prepares up to
 six upcoming sentences in the cache (`CEDAR_TTS_LOOKAHEAD=6`). It can only
 prepare audio as fast as the VM generates it, so some pauses may remain if
 inference takes longer than playback. The CPU limits are ceilings, not reserved cores.
@@ -158,7 +158,7 @@ the captured page, before the app requests speech for each line.
 
 #### Engine and model
 
-Two `.env` values choose what works behind the voices — and each one changes
+Three `.env` values choose what works behind the voices — and each one changes
 how Pocket sounds, so Cedar keys its audio cache on them and a switch
 re-synthesizes the Pocket clips.
 
@@ -182,9 +182,18 @@ variation between retakes — their threshold for ending a word is looser than
 the default model's. On a slow box choose `english_7m_2026-10` and compare
 against `english` before settling.
 
-The pinned release (`CEDAR_POCKET_VERSION`) is a third engine knob, kept in
+**Int8 inference** (`CEDAR_POCKET_QUANTIZE`, default off). Setting it to `1`
+hands the engine quantized weights (upstream's `--quantize`): on x86-64,
+upstream measures roughly 1.3x faster realtime with half the memory, which
+is why an N5105-class VM wants it. Keep it off on ARM64 — the int8 backend
+(`torchao`) ships no ARM64 wheels, and the engine's fallback there runs
+slower than the float engine. Quantized weights draw different audio from
+the same model, so Cedar keys its cache on this too and the switch
+re-synthesizes the Pocket clips once.
+
+The pinned release (`CEDAR_POCKET_VERSION`) is a fourth engine knob, kept in
 step with `Dockerfile.pocket`'s build args by the compose override; leave it
-alone unless you bump the pin yourself. After any change of these three,
+alone unless you bump the pin yourself. After any change of these,
 run the engine contract probe (`tools/pocket_contract_probe.py`) against the
 live engine to confirm its transport and audio shape still match what Cedar
 expects; the probe's header shows how to call it. It needs Python 3 and

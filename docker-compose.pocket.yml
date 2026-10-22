@@ -33,8 +33,11 @@ services:
       # small ones also stop sentences a touch sooner, and voices vary more.
       - --language
       - ${CEDAR_POCKET_MODEL:-english}
-      # Int8 inference reduces work on x86 CPUs such as the N5105.
-      - --quantize
+      # The engines' --quantize flag is deliberate, not hardcoded: the
+      # entrypoint appends it only when .env sets CEDAR_POCKET_QUANTIZE=1.
+      # The current image installs torchao (x86-64) for it, but ARM64's
+      # fallback quantization is slower than the float engine, so the
+      # default stays off. See the env entries below.
     environment:
       # Engine thread caps, sized to the same default ceiling of 2 cores.
       # RAYON_NUM_THREADS applies to the Rust engine, OMP/MKL to the Python one.
@@ -46,6 +49,12 @@ services:
       # token in .env. Without it Pocket runs the model that cannot clone,
       # and only its built-in voices speak.
       HF_TOKEN: ${HF_TOKEN:-}
+      # Int8 inference, opt-in (1 = the engines' --quantize flag). On x86-64
+      # it is worth it: roughly 1.3x faster realtime with half the memory.
+      # Keep it off (the default) on ARM64 — no torchao wheels there, and the
+      # fallback runs slower than the float engine. It also changes the audio
+      # itself, so the entrypoint's flag must agree with Cedar's view below.
+      CEDAR_POCKET_QUANTIZE: ${CEDAR_POCKET_QUANTIZE:-0}
     volumes:
       - pocket-cache:/home/pocket/.cache/pocket_tts
       - pocket-hf-cache:/home/pocket/.cache/huggingface
@@ -87,6 +96,9 @@ services:
       CEDAR_POCKET_IMPL: ${CEDAR_POCKET_IMPL:-python}
       CEDAR_POCKET_MODEL: ${CEDAR_POCKET_MODEL:-english}
       CEDAR_POCKET_VERSION: ${CEDAR_POCKET_VERSION:-4.0.0}
+      # The int8 setting is engine identity as well — quantized weights draw
+      # different audio — so both sides must agree on it for the cache keys.
+      CEDAR_POCKET_QUANTIZE: ${CEDAR_POCKET_QUANTIZE:-0}
       # The owner's cloned voices: where the samples and their manifest live,
       # and the URL the Pocket container fetches a sample from.
       CEDAR_POCKET_VOICES_DIR: /voices

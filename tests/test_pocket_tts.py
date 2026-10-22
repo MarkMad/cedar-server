@@ -71,3 +71,23 @@ def test_pocket_cache_key_names_the_engine(monkeypatch):
     assert len({rust, python, small, bumped}) == 4
     # A Kokoro voice stays keyed as it always was, untouched by any of it.
     assert tts._key(text, "af_heart") == kokoro
+
+
+def test_pocket_cache_key_names_the_int8_state(monkeypatch):
+    """quantized and float weights are different engine states.
+
+    The stock image ran --quantize without recording it anywhere, so a
+    deployment that turns CEDAR_POCKET_QUANTIZE on, or off after upgrading
+    from one, would otherwise serve the other state's clips. The key carries
+    the state on both sides of the toggle.
+    """
+    text, voice = "Hello there", "af_pocket_alba"
+    kokoro = tts._key(text, "af_heart")
+    monkeypatch.setattr(tts, "POCKET_QUANTIZE", False)
+    plain = tts._key(text, voice)
+    monkeypatch.setattr(tts, "POCKET_QUANTIZE", True)
+    int8 = tts._key(text, voice)
+
+    assert plain != int8
+    # A Kokoro voice is untouched by any Pocket setting.
+    assert tts._key(text, "af_heart") == kokoro

@@ -14,6 +14,14 @@ if [ "${POCKET_IMPL:-}" = "rust" ] && [ "$(uname -m)" = "x86_64" ]; then
         exit 1
     fi
 fi
+# Int8 inference is opt-in: .env sets CEDAR_POCKET_QUANTIZE=1 and the flag is
+# appended to whatever command the container runs (Compose or docker run),
+# instead of Compose hardcoding it for every engine image. The default stays
+# off: on ARM64 the engine's fallback quantization runs slower than float,
+# and the wheels for the fast int8 backend ship for x86-64 only.
+if [ "${CEDAR_POCKET_QUANTIZE:-0}" = "1" ]; then
+    set -- "$@" --quantize
+fi
 # Existing model volumes may be root-owned from the previous Pocket image.
 if [ "$(id -u)" = "0" ]; then
     for cache in /home/pocket/.cache/pocket_tts /home/pocket/.cache/huggingface; do

@@ -43,6 +43,13 @@ POCKET_VOICE_BASE = os.environ.get("CEDAR_POCKET_VOICE_BASE", "").rstrip("/")
 POCKET_VERSION = os.environ.get("CEDAR_POCKET_VERSION", "4.0.0").strip() or "4.0.0"
 POCKET_IMPL = os.environ.get("CEDAR_POCKET_IMPL", "python").strip().lower() or "python"
 POCKET_MODEL = os.environ.get("CEDAR_POCKET_MODEL", "english").strip() or "english"
+# Int8 inference, opt-in: the Compose override and the image's entrypoint
+# pass the engine its --quantize flag only when this is on. Linear layers
+# with int8 weights draw different audio from the same model, so the cache
+# prefix in tts.py encodes the state; toggling it re-synthesizes once.
+POCKET_QUANTIZE = os.environ.get(
+    "CEDAR_POCKET_QUANTIZE", "0"
+).strip().lower() in ("1", "true", "yes")
 
 # The owner key. Every /api/* request except /api/health must present it. Empty
 # here means "generate one on first start and keep it in KEY_PATH" (see auth.py).

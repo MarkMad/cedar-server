@@ -23,7 +23,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
     && chown -R pocket:pocket /home/pocket/.cache
 
 # Use the CPU PyTorch wheels; the default Linux wheel set also downloads CUDA.
-RUN pip install --no-cache-dir pocket-tts==${POCKET_VERSION} --extra-index-url https://download.pytorch.org/whl/cpu
+# The [quantize] extra adds torchao — upstream's int8 backend, and the only
+# one that still runs on current torch (the built-in torch.ao fallback is
+# documented for torch 2.5-2.9, while the image resolves whatever torch is
+# newest). Resolving the extra and the engine in one step also lets pip pick
+# a torch that satisfies torchao's stated requirement. torchao is served for
+# x86-64 only here, so the other architectures install without it and run
+# the float engine: Compose leaves the --quantize flag off unless asked.
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+        pkg="pocket-tts[quantize]==${POCKET_VERSION}"; \
+    else \
+        pkg="pocket-tts==${POCKET_VERSION}"; \
+    fi \
+    && pip install --no-cache-dir "$pkg" --extra-index-url https://download.pytorch.org/whl/cpu
 
 COPY pocket-entrypoint.sh /usr/local/bin/pocket-entrypoint
 RUN chmod 0755 /usr/local/bin/pocket-entrypoint /home/pocket /home/pocket/.cache

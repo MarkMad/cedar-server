@@ -54,7 +54,8 @@ import httpx
 from . import blends, substitute
 from .config import (AUDIO_BITRATE_KBPS, AUDIO_CACHE_GB, AUDIO_DIR, AUDIO_FORMAT,
                      AUDIO_SOURCE_FORMAT, KOKORO_URL, POCKET_IMPL, POCKET_MODEL,
-                     POCKET_URL, POCKET_VERSION, POCKET_VOICE_BASE, POCKET_VOICES_DIR,
+                     POCKET_QUANTIZE, POCKET_URL, POCKET_VERSION,
+                     POCKET_VOICE_BASE, POCKET_VOICES_DIR,
                      TTS_CONCURRENCY, TTS_LOOKAHEAD, TTS_TIMEOUT)
 from .pocket_stream import wav_pcm
 
@@ -665,14 +666,19 @@ def _key(text: str, voice: str, spoken: Optional[str] = None) -> str:
     # entry stays valid.
     # Keep every old Kokoro key valid, but isolate Pocket's different audio.
     # Pocket's prefix names the engine it runs (implementation, model,
-    # upstream release): v4.0.0's re-recorded voice embeddings, the small
-    # English models and the Rust image's different noise do not reuse any
-    # clip another one produced. These come from the same CEDAR_POCKET_IMPL /
-    # CEDAR_POCKET_MODEL / CEDAR_POCKET_VERSION env the Compose override hands
-    # the container, so a deployment cannot run one engine and cache the
-    # other's audio.
-    engine = f"pocket|{POCKET_IMPL}|{POCKET_MODEL}|{POCKET_VERSION}|" \
-        if voice in _POCKET_VOICES else ""
+    # upstream release) and the int8 setting: v4.0.0's re-recorded voice
+    # embeddings, the small English models and the Rust image's different
+    # noise do not reuse any clip another one produced, and quantized linear
+    # layers draw different audio from the float engine — named on both
+    # sides (the stock image ran int8 without recording it anywhere) so a
+    # toggle re-synthesizes instead of trading stale clips. These come from
+    # the same CEDAR_POCKET_IMPL / CEDAR_POCKET_MODEL / CEDAR_POCKET_VERSION /
+    # CEDAR_POCKET_QUANTIZE env the Compose override hands the container, so
+    # a deployment cannot run one engine and cache the other's audio.
+    engine = ""
+    if voice in _POCKET_VOICES:
+        engine = (f"pocket|{POCKET_IMPL}|{POCKET_MODEL}|{POCKET_VERSION}|"
+                  f"{'int8' if POCKET_QUANTIZE else 'f32'}|")
     # A blend is keyed by the mix the engine speaks, not by the id the client
     # asked for, so the catalog id and the mix behind it share one cache entry
     # and a changed blend definition cannot serve stale audio.
