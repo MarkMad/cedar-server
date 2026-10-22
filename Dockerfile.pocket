@@ -60,12 +60,12 @@ RUN case "$TARGETARCH" in \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && release="https://github.com/kyutai-labs/pocket-tts/releases/download/v${POCKET_VERSION}" \
-    && curl -fsSL -o /tmp/pocket.tar.gz "$release/$asset" \
+    && curl -fsSL -o "/tmp/${asset}" "$release/$asset" \
     && curl -fsSL -o /tmp/SHA256SUMS "$release/SHA256SUMS" \
     && (cd /tmp && grep -F "  ${asset}" SHA256SUMS | sha256sum -c -) \
-    && tar -xzf /tmp/pocket.tar.gz -C /usr/local \
+    && tar -xzf "/tmp/${asset}" -C /usr/local \
     && ln -s /usr/local/pocket-tts-*/pocket-tts /usr/local/bin/pocket-tts \
-    && rm -rf /tmp/pocket.tar.gz /tmp/SHA256SUMS
+    && rm -rf /tmp/pocket.tar.gz /tmp/SHA256SUMS "/tmp/${asset}"
 
 COPY pocket-entrypoint.sh /usr/local/bin/pocket-entrypoint
 RUN chmod 0755 /usr/local/bin/pocket-entrypoint /home/pocket /home/pocket/.cache
