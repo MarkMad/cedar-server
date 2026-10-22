@@ -55,7 +55,7 @@ optional.
 ### 1 · Start the server
 
 ```bash
-git clone https://github.com/mlevinmail/cedar-server.git
+git clone https://github.com/MarkMad/cedar-server.git
 cd cedar-server
 docker compose up -d
 ```
