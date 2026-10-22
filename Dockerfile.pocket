@@ -53,7 +53,6 @@ CMD ["pocket-tts", "serve", "--host", "0.0.0.0"]
 # plain "pocket-tts" so the entrypoint and CMD are shared with the python stage.
 FROM debian:bookworm-slim AS rust
 ARG POCKET_VERSION=4.0.0
-ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 util-linux \
@@ -65,11 +64,14 @@ RUN apt-get update \
 
 # Upstream attaches the binary to the GitHub release, but its asset names still
 # carry the Rust crate's older "3.3.0" version string — derive nothing from the
-# tag, and verify the download against the release's SHA256SUMS.
-RUN case "$TARGETARCH" in \
-      amd64) asset=pocket-tts-3.3.0-x86_64-unknown-linux-gnu.tar.gz ;; \
-      arm64) asset=pocket-tts-3.3.0-aarch64-unknown-linux-gnu.tar.gz ;; \
-      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+# tag, and verify the download against the release's SHA256SUMS. The arch
+# comes from uname -m, not BuildKit's TARGETARCH, so the build works on the
+# legacy Docker builder too (which leaves TARGETARCH unset and the build
+# would otherwise die with "unsupported architecture").
+RUN case "$(uname -m)" in \
+      x86_64) asset=pocket-tts-3.3.0-x86_64-unknown-linux-gnu.tar.gz ;; \
+      aarch64) asset=pocket-tts-3.3.0-aarch64-unknown-linux-gnu.tar.gz ;; \
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
     esac \
     && release="https://github.com/kyutai-labs/pocket-tts/releases/download/v${POCKET_VERSION}" \
     && curl -fsSL -o "/tmp/${asset}" "$release/$asset" \
