@@ -32,8 +32,10 @@ from .chunker import chunk_plain_text
 from .config import DB_PATH
 from .safefetch import UnsafeUrlError, safe_fetch
 
-# Kept for pre-existing kind='book' documents (imported back when the app had a
-# Gutenberg catalog — the feature was removed 2026-07-11, the documents remain).
+# For kind='book' documents imported from the optional Gutenberg book store
+# (cedar/catalog.py, served only when <data>/gutenberg holds a corpus). This is
+# a separate, older copy of catalog.strip_gutenberg and recognises fewer
+# header/footer layouts; keep the two in step until they share one helper.
 _PG_START = re.compile(r"\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*", re.I | re.S)
 _PG_END = re.compile(r"\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*", re.I | re.S)
 _PG_PRODUCED = re.compile(r"^\s*Produced by .*?$", re.I | re.M)
