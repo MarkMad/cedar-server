@@ -91,26 +91,34 @@ brief names.
 The main agent orchestrates delegated work and remains responsible for
 integration, verification, and the final result. Delegate by choosing the right
 *sub-agent kind* for the task; do not treat it as an automatic model-escalation
-ladder. Two sub-agents are available via the `subagent` tool:
+ladder. Sub-agents are launched with the `Agent` tool, choosing a
+`subagent_type`:
 
-- `explore` — fast, read-only codebase exploration: find files by pattern,
-  search for keywords/symbols, and answer "how does X work" questions. State the
-  desired thoroughness (`quick`, `medium`, or `very thorough`). Use it to gather
-  context before changing code — e.g. tracing callers of `tts.synthesize`,
-  locating route/endpoint handling under `cedar/routes/`, or mapping which tests
-  under `tests/` cover a module.
-- `general` — general-purpose multi-step work that can run in parallel with my
-  own work — e.g. adapting a patch across several files, a bounded refactor, or
-  investigating independent questions concurrently.
+- `Explore` — fast, read-only codebase search: find files by pattern, search for
+  keywords/symbols, and answer "how does X work" questions. State the desired
+  breadth (`quick`, `medium`, or `very thorough`). Use it to gather context
+  before changing code — e.g. tracing callers of `tts.synthesize`, locating
+  route/endpoint handling under `cedar/routes/`, or mapping which tests under
+  `tests/` cover a module. It cannot edit files.
+- `Plan` — read-only software-architect agent that returns a step-by-step
+  implementation plan, critical files, and trade-offs. Use it for non-trivial
+  changes that touch several modules before any code is written. It cannot edit
+  files.
+- `general-purpose` — multi-step work that can run in parallel with my own work
+  — e.g. adapting a patch across several files, a bounded refactor, or
+  investigating independent questions concurrently. It can edit files and run
+  commands.
 
 Routing guidance:
 
 - For small, well-defined, low-risk edits (copy edits, minor styling, a
   straightforward fix with an understood cause, small test updates), do them
   directly — preparing and reviewing a delegation would cost more than the edit.
-- For read-only exploration and context-gathering, prefer `explore`.
+- For read-only exploration and context-gathering, prefer `Explore`.
+- For design work on a larger change, use `Plan`, then review the plan myself
+  before implementing.
 - For independent, parallelizable, or self-contained multi-step work, delegate
-  to `general`.
+  to `general-purpose`.
 - The main agent still owns architecture, invasive changes to the synthesis and
   alignment pipeline (`tts.py`), SQLite migrations or rechunking in `db.py`,
   the deny-by-default auth and SSRF-safe fetching boundaries, app-facing API
@@ -118,27 +126,41 @@ Routing guidance:
 
 Model selection:
 
-- Do not set the sub-agent `model` parameter unless the user explicitly asks for
-  a specific model or variant. When they do, resolve the exact reference with
-  the models tool before passing it.
-- If the chosen sub-agent is unavailable, complete the task directly or use an
-  available sub-agent suited to the same scope, and briefly report the fallback.
-  Never silently substitute a more expensive agent.
+Choose the `Agent` tool's `model` parameter directly from the task's
+complexity; do not use an automatic escalation ladder. A model the user names
+explicitly always overrides these defaults.
+
+- `haiku` — small, well-defined, low-risk tasks: locating files or symbols, copy
+  edits, version bumps, minor styling, or running `ruff`/`pytest` and reporting
+  the output.
+- `sonnet` — typical implementation work: focused features and bug fixes with an
+  understood cause, moderate multi-file changes, adapting patches, writing or
+  updating tests, and fixing `ruff` findings.
+- `opus` — hard or high-risk work: concurrency or the bounded synthesis pool,
+  caching, alignment or audio-pipeline debugging with an unclear root cause, and
+  changes spanning several modules. Review its diff closely.
+- `fable` — reserved for the most demanding cases, such as large cross-cutting
+  migrations or investigations that `opus` could not resolve.
+- If the selected model or sub-agent type is unavailable, complete the task
+  directly or use an available one suited to the same scope, and briefly report
+  the fallback. Never silently substitute a more expensive model or agent.
 
 Briefs and lifecycle:
 
-- New child sessions start with fresh context, so include all relevant context
-  and instructions. Supply a concise, self-contained brief: the request,
-  relevant paths, constraints, and acceptance criteria.
+- New sub-agents start with fresh context (except a `fork`, which inherits the
+  conversation), so include all relevant context and instructions in the
+  `prompt`. Supply a concise, self-contained brief: the request, relevant paths,
+  constraints (110-character lines, no `.env`, owner keys, or runtime data in
+  commits, preserve auth/SSRF/request-size limits, and the "Change
+  authorization" limits above), and acceptance criteria.
 - Give the sub-agent a narrow scope and ask it to report changed files, checks
   performed, and unresolved issues. Do not let it delegate further for a simple
-  task.
-- Run independent sub-agents concurrently (e.g. multiple `subagent` calls in the
-  same tool block). Use `background: true` only for independent work that can
-  proceed while I continue elsewhere; I am notified on completion and must not
-  poll or sleep.
-- Pass back the returned `sessionID` to continue a specific sub-agent
-  conversation; otherwise a new session starts fresh.
+  task. A sub-agent's final report is not shown to the user; relay what matters.
+- Run independent sub-agents concurrently (multiple `Agent` calls in the same
+  tool block). Sub-agents run in the background; I am notified on completion and
+  must not poll, sleep, or predict their results.
+- Use `SendMessage` with the agent's ID or name to continue a specific
+  sub-agent with its context intact; a new `Agent` call starts fresh.
 - While a sub-agent implements a change, do useful independent work such as
   inspecting callers, identifying regression risks, or preparing verification.
   Avoid duplicating its implementation or editing the same files concurrently.
