@@ -160,6 +160,32 @@ def _sweep_audio_cache() -> int:
 
 cache_pairs_shed = _sweep_audio_cache()
 
+# The import-time sweep alone leaves the cap unenforced for as long as the
+# process lives, and a container can run for weeks. New clips are the only
+# thing that grows the cache, so the write path re-checks it, at most this
+# often: a sweep stats every pair, which is not free at 15k+ clips.
+_SWEEP_INTERVAL_S = 300
+_sweep_lock = threading.Lock()
+_last_sweep = time.monotonic()
+
+
+def _maybe_sweep_audio_cache() -> int:
+    """Run `_sweep_audio_cache` if the interval has passed. Blocking — call
+    from the worker thread that just wrote a clip, never the event loop."""
+    global _last_sweep
+    if AUDIO_CACHE_GB <= 0:
+        return 0
+    # Non-blocking: if another writer is already sweeping, skip rather than queue.
+    if not _sweep_lock.acquire(blocking=False):
+        return 0
+    try:
+        if time.monotonic() - _last_sweep < _SWEEP_INTERVAL_S:
+            return 0
+        _last_sweep = time.monotonic()
+        return _sweep_audio_cache()
+    finally:
+        _sweep_lock.release()
+
 # "cedar.*", not __name__: main._configure_logging() attaches the rotating
 # file handler to the "cedar" and "uvicorn.error" trees only. A "cedar.tts"
 # logger under another name would fall through to stderr, i.e. docker logs,
@@ -1256,6 +1282,8 @@ def _read_cache(key: str) -> Optional[dict]:
         meta_path.unlink(missing_ok=True)
         audio_path.unlink(missing_ok=True)
         return None
+    except FileNotFoundError:
+        return None  # shed by the eviction sweep between the probe and the read
     # Touch both pair files so the eviction sweep reads mtime as last-used
     # (see _sweep_audio_cache). Two cheap calls that only run when eviction is
     # configured — with the cap off, the read path does nothing new.
@@ -1282,7 +1310,11 @@ def _read_cache(key: str) -> Optional[dict]:
             os.replace(tmp_meta, meta_path)
         finally:
             tmp_meta.unlink(missing_ok=True)
-    meta["audio_b64"] = base64.b64encode(audio_path.read_bytes()).decode("ascii")
+    try:
+        audio = audio_path.read_bytes()
+    except FileNotFoundError:
+        return None  # shed by the eviction sweep mid-read; synthesize it again
+    meta["audio_b64"] = base64.b64encode(audio).decode("ascii")
     meta["cached"] = True
     return meta
 
@@ -1354,6 +1386,11 @@ def _process_and_store(key: str, text: str, audio_bytes: bytes,
     tmp_meta.write_text(json.dumps(meta))
     os.replace(tmp_audio, audio_path)
     os.replace(tmp_meta, meta_path)
+    try:
+        _maybe_sweep_audio_cache()
+    except Exception:
+        # Housekeeping must never fail a clip that was synthesized and stored.
+        log.warning("audio cache sweep failed", exc_info=True)
 
     meta["audio_b64"] = base64.b64encode(audio_bytes).decode("ascii")
     meta["cached"] = False

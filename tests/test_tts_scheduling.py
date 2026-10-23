@@ -328,12 +328,14 @@ def test_document_route_prefetches_next_window_only_after_success(monkeypatch):
         assert offered[0][-1] == ["Next sentence"]
 
         async def failed(text, voice, speed):
-            raise RuntimeError("synthesis unavailable")
+            raise RuntimeError("synthesis unavailable at http://kokoro:8880/internal")
 
         monkeypatch.setattr(tts, "synthesize", failed)
         with pytest.raises(documents.HTTPException) as exc:
             await documents.synth(7, 6, "af_heart", 1.0)
         assert exc.value.status_code == 502
+        # The engine's address stays in the server log, not in the response.
+        assert "kokoro" not in exc.value.detail and "8880" not in exc.value.detail
         assert len(lookups) == len(offered) == 1
 
         monkeypatch.setattr(tts, "synthesize", synth)

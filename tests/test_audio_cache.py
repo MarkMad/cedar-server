@@ -55,6 +55,54 @@ def test_no_cap_never_evicts(monkeypatch, tmp_path):
     assert (tmp_path / "ancient.json").exists()
 
 
+def _over_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(tts, "_CACHE", tmp_path)
+    monkeypatch.setattr(tts, "AUDIO_CACHE_GB", 300 / _BYTES_PER_GIB)
+    now = time.time()
+    for i, key in enumerate("k1 k2 k3".split()):
+        _write_pair(tmp_path, key, mtime=now - 100 + i)
+
+
+def test_a_running_process_sheds_once_the_interval_has_passed(monkeypatch, tmp_path):
+    _over_cap(monkeypatch, tmp_path)
+    monkeypatch.setattr(tts, "_last_sweep", time.monotonic() - tts._SWEEP_INTERVAL_S - 1)
+
+    assert tts._maybe_sweep_audio_cache() == 1
+    assert not (tmp_path / "k1.mp3").exists()
+
+
+def test_sweeps_are_rate_limited(monkeypatch, tmp_path):
+    _over_cap(monkeypatch, tmp_path)
+    monkeypatch.setattr(tts, "_last_sweep", time.monotonic())
+
+    assert tts._maybe_sweep_audio_cache() == 0
+    assert (tmp_path / "k1.mp3").exists()
+
+
+def test_storing_a_clip_enforces_the_cap(monkeypatch, tmp_path):
+    _over_cap(monkeypatch, tmp_path)
+    monkeypatch.setattr(tts, "_last_sweep", time.monotonic() - tts._SWEEP_INTERVAL_S - 1)
+
+    tts._process_and_store("fresh", "Hello", b"a" * 100, [])
+
+    assert (tmp_path / "fresh.mp3").exists()  # the clip just written is the newest
+    assert not (tmp_path / "k1.mp3").exists()
+
+
+def test_a_pair_shed_mid_read_is_a_miss_not_an_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(tts, "_CACHE", tmp_path)
+    audio, _meta = _write_pair(tmp_path, "gone", mtime=time.time())
+    real = tts.Path.read_bytes
+
+    def vanish(self):
+        self.unlink()
+        return real(self)
+
+    monkeypatch.setattr(tts.Path, "read_bytes", vanish)
+    assert tts._read_cache("gone") is None
+    assert not audio.exists()
+
+
 def test_cache_hit_touches_pair_for_lru(monkeypatch, tmp_path):
     monkeypatch.setattr(tts, "_CACHE", tmp_path)
     monkeypatch.setattr(tts, "AUDIO_CACHE_GB", 1.0)

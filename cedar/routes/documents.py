@@ -371,8 +371,11 @@ async def synth(doc_id: int, idx: int, voice: str = Query(...), speed: float = Q
     speed = max(0.5, min(2.0, speed))
     try:
         result = await tts.synthesize(text, voice, speed)
-    except Exception as e:
-        raise HTTPException(502, f"TTS service error: {e}")
+    except Exception:
+        # The exception text can carry the engine's internal URL; keep that in
+        # the server log and give the client only the fact (as live.py does).
+        log.exception("tts failed doc=%d idx=%d", doc_id, idx)
+        raise HTTPException(502, "The voice service could not read that sentence.")
     if window is not None:
         try:
             upcoming = await asyncio.to_thread(db.get_sentences, doc_id, idx + 1, TTS_LOOKAHEAD)
