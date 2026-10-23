@@ -132,11 +132,15 @@ def _ingest_pdf_bytes(data: bytes, fallback_title: str, *, source_url: str | Non
         raise HTTPException(
             400, "No selectable text found. This looks like a scanned PDF (needs OCR).")
 
-    doc_id = db.create_document(
-        title=result.title, filename=stored, num_pages=result.num_pages,
-        pages_index=result.pages, chunks=result.chunks, toc=result.toc,
-        source_url=source_url, lang=lang.detect_chunks(result.chunks),
-    )
+    try:
+        doc_id = db.create_document(
+            title=result.title, filename=stored, num_pages=result.num_pages,
+            pages_index=result.pages, chunks=result.chunks, toc=result.toc,
+            source_url=source_url, lang=lang.detect_chunks(result.chunks),
+        )
+    except Exception:
+        dest.unlink(missing_ok=True)  # no row will ever point at this file
+        raise
     return _summary(doc_id, result, result.num_pages)
 
 
@@ -498,7 +502,7 @@ def set_voice(doc_id: int, body: VoiceIn):
     if not doc:
         raise HTTPException(404, "Document not found.")
     voice = (body.voice or "").strip()
-    if not lang.language_of(voice) or len(voice) > 40:
+    if not tts.valid_voice_id(voice) or not lang.language_of(voice) or len(voice) > 40:
         raise HTTPException(400, "Unknown voice.")
     language = doc.get("lang")
     label = lang.LANG_LABEL.get(language or "")
@@ -527,6 +531,11 @@ def generated(doc_id: int, body: GeneratedIn):
 
 # ------------------------------------------------------ bookmarks, highlights
 
+# A bookmark note is a line or two, not a document; without a cap it could be
+# as large as the request body limit.
+MAX_NOTE_CHARS = 2000
+
+
 class BookmarkIn(BaseModel):
     idx: int
     note: str | None = None
@@ -540,7 +549,7 @@ def list_bookmarks(doc_id: int):
 
 @router.post("/documents/{doc_id}/bookmarks")
 def add_bookmark(doc_id: int, body: BookmarkIn):
-    bm = db.add_bookmark(doc_id, max(0, body.idx), (body.note or "").strip())
+    bm = db.add_bookmark(doc_id, max(0, body.idx), (body.note or "").strip()[:MAX_NOTE_CHARS])
     if bm is None:
         raise HTTPException(404, "Document not found.")
     return {"ok": True, "bookmark": bm}

@@ -343,11 +343,13 @@ async def define(word: str, lang: str | None, _hop: int = 0) -> dict | None:
     if not base or len(base) > 64:
         return None
     for cand in _candidates(base, lang):
-        hit, provider, entry = _cached(cand, lang)
+        # SQLite, with a 30 s lock timeout: off the event loop, like every other
+        # database call in the app.
+        hit, provider, entry = await asyncio.to_thread(_cached, cand, lang)
         cached = True
         if not hit:
             provider, entry = await _race(cand, lang)
-            _store(cand, lang, provider if entry else None, entry)
+            await asyncio.to_thread(_store, cand, lang, provider if entry else None, entry)
             cached = False
         if not entry:
             continue  # a miss (fresh or remembered) — try the next spelling

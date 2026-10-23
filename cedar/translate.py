@@ -219,12 +219,13 @@ async def lookup(word: str, src: str | None, dst: str | None) -> dict | None:
     if not base or len(base) > 64:
         return None
 
-    hit, terms = _cached(base, src, dst)
+    # SQLite, with a 30 s lock timeout: off the event loop.
+    hit, terms = await asyncio.to_thread(_cached, base, src, dst)
     if not hit:
         try:
             terms = await _fetch(base, dst)
         except Exception as e:  # network, JSON, timeout — all just "no line"
             log.info("translate(%r, %s→%s) failed: %s", base, src, dst, e)
             return None
-        _store(base, src, dst, terms)
+        await asyncio.to_thread(_store, base, src, dst, terms)
     return {"lang": dst, "terms": terms} if terms else None

@@ -623,7 +623,10 @@ def chunk_plain_text(title: str, text: str, *,
 _MD_IMG = re.compile(r"!\[([^\]]*)\]\(\s*(<[^>]+>|[^)\s]+)[^)]*\)")
 _MD_LINK = re.compile(r"(?<!!)\[([^\]]*)\]\([^)]*\)")
 _MD_HEAD = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
-_MD_EMPH = re.compile(r"(\*\*|__|\*|_|`)(.+?)\1", re.DOTALL)
+_MD_EMPH = re.compile(r"(\*\*|\*|`)(.+?)\1", re.DOTALL)
+# Underscore emphasis only counts at a word edge: in snake_case_name the
+# underscores are part of the word, and deleting them changes what is read out.
+_MD_EMPH_US = re.compile(r"(?<!\w)(__|_)(.+?)\1(?!\w)", re.DOTALL)
 _MD_BLOCK = re.compile(r"\n[ \t]*\n")
 # Shortest body paragraph eligible for whole-document dedup. Anything shorter is
 # kept even when repeated — short lines legitimately recur in real books.
@@ -651,11 +654,11 @@ def _strip_inline_md(text: str) -> str:
     """Markdown -> plain reading text: drop links to their label, strip emphasis."""
     text = _MD_LINK.sub(r"\1", text)
     for _ in range(3):  # nested emphasis, a couple of passes
-        new = _MD_EMPH.sub(r"\2", text)
+        new = _MD_EMPH_US.sub(r"\2", _MD_EMPH.sub(r"\2", text))
         if new == text:
             break
         text = new
-    text = re.sub(r"^>\s?", "", text)            # blockquote marker
+    text = re.sub(r"^>\s?", "", text, flags=re.M)  # blockquote marker, every line
     text = re.sub(r"^[-*+]\s+", "", text)         # list bullet
     text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!])", r"\1", text)  # unescape
     return text.strip()
