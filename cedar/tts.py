@@ -1246,7 +1246,16 @@ def _read_cache(key: str) -> Optional[dict]:
     audio_path = _CACHE / f"{key}.{AUDIO_FORMAT}"
     if not (meta_path.exists() and audio_path.exists()):
         return None
-    meta = json.loads(meta_path.read_text())
+    try:
+        meta = json.loads(meta_path.read_text())
+    except ValueError:
+        # Truncated or garbled (an interrupted write, a full disk). Left in
+        # place it would fail every future read of this sentence; drop the
+        # pair so it is simply synthesized again.
+        log.warning("tts cache entry unreadable, discarding key=%s", key[:12])
+        meta_path.unlink(missing_ok=True)
+        audio_path.unlink(missing_ok=True)
+        return None
     # Touch both pair files so the eviction sweep reads mtime as last-used
     # (see _sweep_audio_cache). Two cheap calls that only run when eviction is
     # configured — with the cap off, the read path does nothing new.
@@ -1265,9 +1274,14 @@ def _read_cache(key: str) -> Optional[dict]:
             _align_words(meta["text"], meta["raw"]),
             [substitute.Edit(*e) for e in meta.get("edits") or []])
         meta["align"] = _ALIGN_VERSION
-        tmp_meta = meta_path.with_suffix(".json.tmp")
-        tmp_meta.write_text(json.dumps(meta))
-        os.replace(tmp_meta, meta_path)
+        # A name of its own: a demand read and a prefetch can re-align the same
+        # stale entry at once, and sharing one temp file let them interleave.
+        tmp_meta = meta_path.with_suffix(f".json.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_meta.write_text(json.dumps(meta))
+            os.replace(tmp_meta, meta_path)
+        finally:
+            tmp_meta.unlink(missing_ok=True)
     meta["audio_b64"] = base64.b64encode(audio_path.read_bytes()).decode("ascii")
     meta["cached"] = True
     return meta
