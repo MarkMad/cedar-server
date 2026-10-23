@@ -145,3 +145,30 @@ def test_cloned_voice_is_offered_by_the_picker(monkeypatch, tmp_path, pocket_voi
 
     voices = asyncio.run(_real_list_voices())
     assert "af_pocket_narrator" in voices
+
+
+def test_legacy_v0_voices_are_not_offered(monkeypatch):
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"voices": ["af_heart", "af_bella", "af_v0", "af_v0bella", "am_v0adam"]}
+
+    class Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            pass
+
+        async def get(self, url):
+            return Resp()
+
+    monkeypatch.setattr(tts.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(tts, "POCKET_URL", "")
+
+    assert asyncio.run(_real_list_voices()) == ["af_bella", "af_heart"]

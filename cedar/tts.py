@@ -1606,6 +1606,12 @@ def _client_payload(meta: dict) -> dict:
     return meta
 
 
+# Kokoro-FastAPI also ships the voices of the older v0.19 model (af_v0bella,
+# am_v0adam, ...). Several share a name with a current voice, so the picker
+# would show every one of them twice.
+_LEGACY_VOICE = re.compile(r"^[a-z][fm]_v0")
+
+
 async def list_voices() -> List[str]:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -1627,6 +1633,7 @@ async def list_voices() -> List[str]:
             vid = v.get("id") or v.get("name")
             if vid:
                 out.append(vid)
+    out = [v for v in out if not _LEGACY_VOICE.match(v)]
     if POCKET_URL and await pocket_health():
         out.extend(_POCKET_VOICES)
     return sorted(set(out))
