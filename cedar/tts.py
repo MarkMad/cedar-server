@@ -30,6 +30,7 @@ import asyncio
 import base64
 import concurrent.futures
 import hashlib
+import io
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ import tempfile
 import threading
 import time
 import uuid
+import wave
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -1012,7 +1014,16 @@ class _StreamJob:
     queued_at: float = field(default_factory=time.monotonic)
 
 
-_demand: OrderedDict[str, _SynthesisJob | _StreamJob] = OrderedDict()
+@dataclass
+class _RawJob:
+    key: str
+    text: str      # what the engine is given — the substituted words
+    voice: str
+    future: asyncio.Future
+    queued_at: float = field(default_factory=time.monotonic)
+
+
+_demand: OrderedDict[str, _SynthesisJob | _StreamJob | _RawJob] = OrderedDict()
 _speculative: OrderedDict[str, _SynthesisJob] = OrderedDict()
 _active: Dict[str, asyncio.Task] = {}
 _windows: OrderedDict[tuple[int, str], object] = OrderedDict()
@@ -1038,7 +1049,12 @@ def _dispatch() -> None:
     while not _closing and len(_active) < TTS_CONCURRENCY and (_demand or _speculative):
         queue = _demand if _demand else _speculative
         key, job = queue.popitem(last=False)
-        runner = _run_stream_job if isinstance(job, _StreamJob) else _run_job
+        if isinstance(job, _StreamJob):
+            runner = _run_stream_job
+        elif isinstance(job, _RawJob):
+            runner = _run_raw_job
+        else:
+            runner = _run_job
         _active[key] = asyncio.create_task(runner(job))
 
 
@@ -1148,6 +1164,77 @@ async def stream_pocket(text: str, voice: str) -> AsyncIterator[bytes]:
             future.cancel()
         _dispatch()
     yield (json.dumps(terminal, separators=(",", ":")) + "\n").encode()
+
+
+async def _run_raw_job(job: _RawJob) -> None:
+    """One uncached WAV from the engine, in a slot of the shared bounded pool."""
+    started = time.monotonic()
+    try:
+        async with asyncio.timeout(TTS_TIMEOUT):
+            if job.voice in _POCKET_VOICES:
+                wav = await _ask_pocket(job.text, job.voice)
+            else:
+                wav, _ = await _ask_kokoro(job.text, job.voice, "wav")
+        if not wav:
+            raise ValueError("The engine returned no audio")
+        job.future.set_result(wav)
+    except asyncio.CancelledError:
+        job.future.cancel()
+        raise
+    except Exception as exc:
+        # The engine's reply can echo the text and its URL: log what it said
+        # about itself (as _synth_uncached does), never hand it to the caller.
+        detail = _kokoro_error(exc) if isinstance(exc, httpx.HTTPError) else type(exc).__name__
+        log.warning("tts raw failed elapsed_s=%.3f error=%s",
+                    time.monotonic() - started, detail)
+        job.future.set_exception(exc)
+    finally:
+        _active.pop(job.key, None)
+        _dispatch()
+
+
+async def synthesize_raw(text: str, voice: str) -> bytes:
+    """Uncached, unaligned WAV for `text`, for callers that want the engine's
+    own audio (the OpenAI-compatible /v1 API). Same substitutions and the same
+    bounded slots as `synthesize`, but nothing is stored or coalesced."""
+    spoken, _ = substitute.plan(text, None, voice)
+    if not _has_speech(spoken):
+        return _silence_wav()
+    if _closing:
+        raise RuntimeError("synthesis is shutting down")
+    if voice in _POCKET_VOICES and not POCKET_URL:
+        raise RuntimeError("Pocket TTS is not configured")
+    future = asyncio.get_running_loop().create_future()
+    future.add_done_callback(_retrieve_exception)
+    job = _RawJob("raw:" + uuid.uuid4().hex, spoken, voice, future)
+    _demand[job.key] = job
+    _dispatch()
+    try:
+        # Includes the wait for a slot, like the stream path's deadline.
+        async with asyncio.timeout(TTS_TIMEOUT):
+            return await future
+    finally:
+        _demand.pop(job.key, None)
+        if not future.done():
+            # Abandoned (disconnect or timeout): free the slot it holds.
+            task = _active.get(job.key)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                _active.pop(job.key, None)
+            future.cancel()
+            _dispatch()
+
+
+def _silence_wav(seconds: float = 0.25) -> bytes:
+    """A short silent clip for text with nothing to say (see _has_speech)."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(24_000)
+        out.writeframes(b"\0\0" * int(24_000 * seconds))
+    return buf.getvalue()
 
 
 async def _run_job(job: _SynthesisJob) -> None:

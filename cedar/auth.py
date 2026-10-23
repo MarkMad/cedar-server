@@ -25,7 +25,7 @@ import secrets
 from fastapi import Request
 
 from . import ratelimit
-from .config import CEDAR_KEY, KEY_PATH
+from .config import CEDAR_KEY, CEDAR_TTS_KEY, KEY_PATH
 
 log = logging.getLogger("cedar.auth")
 
@@ -35,6 +35,9 @@ log = logging.getLogger("cedar.auth")
 banner_log = logging.getLogger("cedar.auth.banner")
 
 _key: str = ""
+# The TTS-only key for OpenAI-compatible clients (CEDAR_TTS_KEY). It is only ever
+# compared for /v1/* requests and is never generated: unset means /v1 is closed.
+_tts_key: str = ""
 
 # A configured key shorter than this is refused at startup: with the guess
 # throttle below as the only other defence, the key's length is the security.
@@ -84,6 +87,21 @@ def load_key() -> str:
     return _key
 
 
+def load_tts_key() -> str:
+    """Resolve the TTS key from CEDAR_TTS_KEY ('' leaves /v1 closed). Call after
+    `load_key`: a TTS key equal to the owner key would defeat having two."""
+    global _tts_key
+    _tts_key = ""
+    if not CEDAR_TTS_KEY:
+        return ""
+    _check_strength(CEDAR_TTS_KEY, "CEDAR_TTS_KEY")
+    if hmac.compare_digest(CEDAR_TTS_KEY.encode("utf-8"), _key.encode("utf-8")):
+        raise WeakKeyError("CEDAR_TTS_KEY must differ from the owner key.")
+    _tts_key = CEDAR_TTS_KEY
+    log.info("tts key: from CEDAR_TTS_KEY (/v1 enabled)")
+    return _tts_key
+
+
 def _banner(key: str) -> None:
     line = "=" * 64
     banner_log.warning("\n%s\n  A new owner key was generated. Enter it in the Cedar app\n"
@@ -104,13 +122,21 @@ def presented(request: Request) -> str:
     return request.headers.get("x-cedar-key", "").strip()
 
 
-def valid(candidate: str) -> bool:
+def _matches(secret: str, candidate: str) -> bool:
     """Constant-time comparison on bytes: `hmac.compare_digest` refuses
     non-ASCII *strings* with a TypeError, and a header is anything the peer
     chose to send — that must be a plain "no", not a 500."""
-    if not _key or not candidate:
+    if not secret or not candidate:
         return False
-    return hmac.compare_digest(candidate.encode("utf-8"), _key.encode("utf-8"))
+    return hmac.compare_digest(candidate.encode("utf-8"), secret.encode("utf-8"))
+
+
+def valid(candidate: str) -> bool:
+    return _matches(_key, candidate)
+
+
+def valid_tts(candidate: str) -> bool:
+    return _matches(_tts_key, candidate)
 
 
 def client_address(request: Request) -> str:
@@ -121,8 +147,18 @@ def authenticate(request: Request) -> str:
     """'ok' for the owner; otherwise 'throttled' (this peer has guessed too
     often — say nothing about the key) or 'bad' (wrong, counted, or missing,
     which is a plain 401 and not counted: there is nothing to guess)."""
+    return _verdict(request, valid)
+
+
+def authenticate_tts(request: Request) -> str:
+    """`authenticate` for /v1/*: only the TTS key opens it, and the owner key
+    does not. With no TTS key configured every request is refused."""
+    return _verdict(request, valid_tts)
+
+
+def _verdict(request: Request, check) -> str:
     candidate = presented(request)
-    if valid(candidate):
+    if check(candidate):
         return "ok"
     if not candidate:
         return "bad"

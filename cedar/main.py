@@ -22,12 +22,14 @@ from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import __version__, auth, db, dictionary, settings, translate, tts
 from .bodylimit import BodyLimitMiddleware
 from .config import DATA_DIR, SERVER_NAME
-from .routes import all_routers
+from .routes import all_routers, openai
 from .textsafe import printable
 
 # Reachable without the key: the status page (setup instructions, no secrets)
@@ -71,6 +73,7 @@ async def _lifespan(app: FastAPI):
     dictionary.init_tables()
     translate.init_tables()
     auth.load_key()
+    auth.load_tts_key()
     # The trust store is read once and shared by every synthesis client; do it
     # here so the first sentence does not pay for it on the request path.
     await asyncio.to_thread(tts.warm_transport)
@@ -90,6 +93,10 @@ app = FastAPI(title="cedar-server", version=__version__, docs_url=None, redoc_ur
 app.add_middleware(BodyLimitMiddleware)
 
 
+def is_openai_path(path: str) -> bool:
+    return path == "/v1" or path.startswith("/v1/")
+
+
 def _path(request: Request) -> str:
     """The path the router matches on. Not `request.url.path`: that URL is
     rebuilt from the Host header, which the peer writes, so "Host: x/api/health?"
@@ -99,8 +106,12 @@ def _path(request: Request) -> str:
 
 @app.middleware("http")
 async def _gate(request: Request, call_next):
-    if _path(request) not in OPEN_PATHS:
-        verdict = auth.authenticate(request)
+    path = _path(request)
+    if path not in OPEN_PATHS:
+        # /v1 (OpenAI-compatible TTS) takes only the TTS key; everything else
+        # takes only the owner key. Neither key opens the other's paths.
+        verdict = (auth.authenticate_tts(request) if is_openai_path(path)
+                   else auth.authenticate(request))
         if verdict == "throttled":
             return JSONResponse({"detail": "Too many wrong keys — try again later."},
                                 status_code=429,
@@ -135,7 +146,7 @@ async def _log_failures(request: Request, call_next):
     """One line per failed API request. Successes aren't logged: playback alone
     fires dozens of /tts calls a minute."""
     started = time.monotonic()
-    is_api = _path(request).startswith("/api/")
+    is_api = _path(request).startswith("/api/") or is_openai_path(_path(request))
     path = printable(_path(request), 300)
     try:
         resp = await call_next(request)
@@ -151,6 +162,19 @@ async def _log_failures(request: Request, call_next):
 
 for r in all_routers:
     app.include_router(r)
+
+
+@app.exception_handler(openai.OpenAIError)
+async def _openai_error(request: Request, exc: openai.OpenAIError):
+    return openai.error_response(exc.status, exc.message, exc.code, exc.kind)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    """/v1 clients expect OpenAI's error body; the rest keep FastAPI's."""
+    if is_openai_path(_path(request)):
+        return openai.error_response(400, "The request body is not valid.", "invalid_request")
+    return await request_validation_exception_handler(request, exc)
 
 
 _STATUS_PAGE = """<!doctype html>

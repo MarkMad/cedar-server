@@ -55,6 +55,10 @@ POCKET_QUANTIZE = os.environ.get(
 # here means "generate one on first start and keep it in KEY_PATH" (see auth.py).
 CEDAR_KEY = os.environ.get("CEDAR_KEY", "").strip()
 
+# A second, narrower key for OpenAI-compatible clients: it opens /v1/* and nothing
+# else. Empty (the default) leaves /v1 closed to everyone. See auth.py.
+CEDAR_TTS_KEY = os.environ.get("CEDAR_TTS_KEY", "").strip()
+
 # A name for this server, shown in the app's Profile tab. Purely cosmetic.
 SERVER_NAME = os.environ.get("CEDAR_SERVER_NAME", "My Cedar server").strip()[:60]
 

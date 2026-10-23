@@ -442,6 +442,7 @@ All optional; set them in `.env` (compose reads it) or the environment.
 | Variable | Default | What it does |
 |---|---|---|
 | `CEDAR_KEY` | generated | The owner key. Generated on first start and kept in the data volume as `cedar.key` when unset. |
+| `CEDAR_TTS_KEY` | unset | Enables the OpenAI-compatible speech API at `/v1` (`POST /v1/audio/speech`, `GET /v1/models`, `GET /v1/audio/voices`). This key opens `/v1` only and the owner key does not; 16+ characters, different from `CEDAR_KEY`. Point an OpenAI client at `http://<server>:8000/v1` with this as its API key. `response_format` may be `mp3`, `wav` or `pcm`; OpenAI voice names map to Kokoro voices, and Kokoro ids, blends and Pocket voices pass through. `speed` is ignored. |
 | `CEDAR_SERVER_NAME` | `My Cedar server` | Shown in the app's Profile tab. |
 | `CEDAR_PORT` | `8000` | Host port (compose only). |
 | `CEDAR_DATA` | `/data` in the container | Where the database, uploads and audio cache live. |

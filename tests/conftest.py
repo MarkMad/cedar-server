@@ -13,6 +13,7 @@ import pytest
 _TMP = tempfile.mkdtemp(prefix="cedar-test-")
 os.environ["CEDAR_DATA"] = _TMP
 os.environ["CEDAR_KEY"] = "test-owner-key-0123456"
+os.environ["CEDAR_TTS_KEY"] = "test-tts-key-0123456789"
 os.environ["CEDAR_KOKORO_URL"] = "http://kokoro.invalid:8880"
 os.environ["CEDAR_TTS_LOOKAHEAD"] = "0"
 
@@ -25,6 +26,7 @@ from cedar.main import app  # noqa: E402
 
 KEY = os.environ["CEDAR_KEY"]
 AUTH = {"Authorization": f"Bearer {KEY}"}
+TTS_AUTH = {"Authorization": f"Bearer {os.environ['CEDAR_TTS_KEY']}"}
 
 
 async def _fake_synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
