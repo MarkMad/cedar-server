@@ -41,7 +41,7 @@ _key: str = ""
 MIN_KEY_LENGTH = 16
 
 # Wrong-key attempts per client address: 30 in 10 minutes, then 429 for the
-# rest of the window. Only failures count.
+# rest of the window. Only wrong keys count; a request with no key does not.
 _failures = ratelimit.SlidingWindow(limit=30, window_s=600)
 THROTTLE_RETRY_S = 600
 
@@ -119,9 +119,13 @@ def client_address(request: Request) -> str:
 
 def authenticate(request: Request) -> str:
     """'ok' for the owner; otherwise 'throttled' (this peer has guessed too
-    often — say nothing about the key) or 'bad' (wrong or missing, counted)."""
-    if valid(presented(request)):
+    often — say nothing about the key) or 'bad' (wrong, counted, or missing,
+    which is a plain 401 and not counted: there is nothing to guess)."""
+    candidate = presented(request)
+    if valid(candidate):
         return "ok"
+    if not candidate:
+        return "bad"
     peer = client_address(request)
     if not _failures.check(peer):
         return "throttled"

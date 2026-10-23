@@ -76,6 +76,18 @@ def test_throttle_never_locks_out_the_owner(client):
         auth._failures.reset(peer)
 
 
+def test_requests_without_a_key_are_not_counted_by_the_throttle(client):
+    peer = "testclient"
+    auth._failures.reset(peer)
+    try:
+        for _ in range(auth._failures.limit + 5):
+            assert client.get("/api/me").status_code == 401
+        # Still not throttled: a wrong key gets 401, not 429.
+        assert client.get("/api/me", headers=WRONG).status_code == 401
+    finally:
+        auth._failures.reset(peer)
+
+
 def test_weak_configured_key_refuses_to_start(monkeypatch):
     monkeypatch.setattr(auth, "CEDAR_KEY", "short")
     with pytest.raises(auth.WeakKeyError):
