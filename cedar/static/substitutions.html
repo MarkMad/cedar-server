@@ -22,6 +22,7 @@
   button:disabled { opacity:.5; cursor:default; }
   .row { display:flex; gap:8px; align-items:center; }
   .row > input[type=password] { flex:1; min-width:0; }
+  .card + .row { flex-wrap:wrap; }
   .tabs { flex-wrap:wrap; margin:12px 0 6px; }
   .tabs button[aria-pressed="true"] { background:var(--accent); color:#10140f; border-color:var(--accent); font-weight:600; }
   td .row > input { flex:1; min-width:0; }
@@ -78,6 +79,9 @@
     <div class="row">
       <button id="save" class="primary" type="button">Save</button>
       <button id="reload" type="button">Discard changes</button>
+      <button id="export" type="button" title="Download these rules as a file for another Cedar server">Export</button>
+      <button id="import" type="button" title="Add the rules from an exported file">Import</button>
+      <input id="importfile" type="file" accept=".json,application/json" hidden>
     </div>
     <p class="msg" id="msg" role="status"></p>
   </div>
@@ -350,6 +354,95 @@ $("add").addEventListener("click", () => {
   if (inputs.length) inputs[inputs.length - 1].focus();
 });
 $("reload").addEventListener("click", () => load(true));
+
+// ------------------------------------------------------------ export / import
+
+const EXPORT_FORMAT = "cedar-substitutions";
+const MAX_IMPORT_BYTES = 1_000_000;
+const ENGINE_KEYS = ["*", "kokoro", "pocket"];
+
+// What is in the editor now (saved or not, filter or no filter) as a file.
+$("export").addEventListener("click", () => {
+  const { map, problems } = build();
+  if (problems.length) { say("msg", "Fix this before exporting: " + problems[0], "bad"); return; }
+  const count = Object.values(map).reduce(
+    (n, byEngine) => n + Object.values(byEngine).reduce((m, t) => m + Object.keys(t).length, 0), 0);
+  if (!count) { say("msg", "There are no rules to export.", "bad"); return; }
+  const file = JSON.stringify({ format: EXPORT_FORMAT, version: 1, substitutions: map }, null, 2) + "\n";
+  const url = URL.createObjectURL(new Blob([file], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "cedar-substitutions-" + new Date().toISOString().slice(0, 10) + ".json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  say("msg", "Exported " + count + " rules.", "ok");
+});
+
+// An exported file, or a bare rules map in either shape the server accepts,
+// as editor rows. Anything that is not rules is refused whole.
+function rowsFromImport(data) {
+  const isMap = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (isMap(data) && data.format === EXPORT_FORMAT) {
+    if (data.version !== 1) throw new Error("This file is from a newer Cedar; its version is not supported.");
+    data = data.substitutions;
+  }
+  if (!isMap(data)) throw new Error("This is not a Cedar substitutions file.");
+  const out = [];
+  for (const [lang, table] of Object.entries(data)) {
+    if (!isMap(table)) throw new Error("The rules for " + JSON.stringify(lang) + " are not a table.");
+    for (const [key, value] of Object.entries(table)) {
+      if (isMap(value)) {
+        const engine = key.trim().toLowerCase();
+        if (!ENGINE_KEYS.includes(engine)) throw new Error(JSON.stringify(key) + " is not an engine.");
+        for (const [word, repl] of Object.entries(value)) {
+          if (typeof repl !== "string") throw new Error("The replacement for " + JSON.stringify(word) + " is not text.");
+          out.push({ lang: lang.trim().toLowerCase(), engine, word: word.trim(), repl: repl.trim() });
+        }
+      } else if (typeof value === "string") {
+        out.push({ lang: lang.trim().toLowerCase(), engine: "*", word: key.trim(), repl: value.trim() });
+      } else {
+        throw new Error("The replacement for " + JSON.stringify(key) + " is not text.");
+      }
+    }
+  }
+  return out;
+}
+
+// Imported rules are added to the editor, not saved: they win over a rule for
+// the same language, engine and word, and nothing reaches the server until
+// Save, where it is checked like any other edit.
+$("import").addEventListener("click", () => $("importfile").click());
+$("importfile").addEventListener("change", async () => {
+  const input = $("importfile");
+  const file = input.files && input.files[0];
+  input.value = "";
+  if (!file) return;
+  try {
+    if (file.size > MAX_IMPORT_BYTES) throw new Error("That file is too large to be a rules file.");
+    let data;
+    try { data = JSON.parse(await file.text()); } catch (e) { throw new Error("That file is not valid JSON."); }
+    const incoming = rowsFromImport(data);
+    const index = new Map(rows.map((r, i) => [
+      r.lang.trim().toLowerCase() + "\u0000" + r.engine + "\u0000" + r.word.trim().toLowerCase(), i]));
+    let added = 0, changed = 0;
+    for (const n of incoming) {
+      const id = n.lang + "\u0000" + n.engine + "\u0000" + n.word.toLowerCase();
+      if (index.has(id)) {
+        const r = rows[index.get(id)];
+        if (r.repl.trim() !== n.repl) { r.repl = n.repl; changed++; }
+      } else {
+        rows.push(n); index.set(id, rows.length - 1); added++;
+      }
+    }
+    render();
+    say("msg", "Imported " + incoming.length + " rules (" + added + " new, " + changed
+        + " changed). Review them, then press Save.", "ok");
+  } catch (e) {
+    say("msg", e.message, "bad");
+  }
+});
 
 $("save").addEventListener("click", async () => {
   const { map, problems } = build();
