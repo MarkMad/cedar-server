@@ -30,6 +30,13 @@ had.
 Rules are per language, with "*" for the ones that hold everywhere. The
 language comes from the voice, which is chosen to speak the language the text
 is in; "*" rules apply whatever the language turns out to be.
+
+A respelling that suits one engine's G2P can sound wrong on another, so each
+language's rules may also be scoped to an engine ("kokoro" or "pocket"; "*"
+for both). The stored form is ``{language: {engine: {word: replacement}}}``.
+The older flat ``{language: {word: replacement}}`` is still accepted and means
+"every engine". Where several rules name the same word the most specific wins:
+language + engine, then the language's own, then "*" + engine, then "*".
 """
 from __future__ import annotations
 
@@ -47,8 +54,13 @@ log = logging.getLogger("cedar.substitute")
 # The server knob the rules live in.
 KNOB = "substitutions"
 
-# The bucket of rules that apply whatever the language turns out to be.
+# The bucket of rules that apply whatever the language turns out to be, and
+# (inside a language) whatever the engine turns out to be.
 ANY = "*"
+
+# The engines a rule can be scoped to. The engine is the voice's: Pocket's
+# voices (cloned ones included) run on Pocket, every other voice on Kokoro.
+ENGINES = ("kokoro", "pocket")
 
 # Bounds. The rules are owner-supplied text that runs over every sentence the
 # server ever speaks, so they are capped like any other input: a runaway map
@@ -110,8 +122,30 @@ _MATCHER_CACHE_MAX = 8
 
 # ------------------------------------------------------------------- validation
 
-def validate(value: Any) -> dict[str, dict[str, str]]:
+def _check_rule(code: str, word: Any, replacement: Any) -> tuple[str, str]:
+    """One rule, trimmed and checked; raises :class:`RulesError` if unusable."""
+    if not isinstance(word, str) or not isinstance(replacement, str):
+        raise RulesError(f"The rules for {code!r} must be word -> replacement strings.")
+    word, replacement = word.strip(), replacement.strip()
+    if not word:
+        raise RulesError(f"The {code!r} rules have an empty word in them.")
+    if len(word) > MAX_WORD_LENGTH:
+        raise RulesError(f"A word in the {code!r} rules is too long.")
+    if not replacement:
+        raise RulesError(f"{word!r} has nothing to say instead.")
+    if len(replacement) > MAX_REPLACEMENT_LENGTH:
+        raise RulesError(f"The replacement for {word!r} is too long.")
+    if not _WORDISH.search(word):
+        raise RulesError(f"{word!r} has no letters or digits in it.")
+    return word, replacement
+
+
+def validate(value: Any) -> dict[str, dict[str, dict[str, str]]]:
     """Check a substitution map and return it in canonical form.
+
+    Accepts ``{language: {engine: {word: replacement}}}`` and the older
+    ``{language: {word: replacement}}`` (every engine); the two may be mixed
+    inside one language. The result is always the nested form.
 
     Raises :class:`RulesError` with a message the owner can act on; the
     settings route turns that into a 400.
@@ -122,7 +156,7 @@ def validate(value: Any) -> dict[str, dict[str, str]]:
         raise RulesError("Substitutions must be an object of language -> {word: replacement}.")
     if len(value) > MAX_LANGUAGES:
         raise RulesError(f"Too many languages ({len(value)}); at most {MAX_LANGUAGES}.")
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, dict[str, str]]] = {}
     for code, table in value.items():
         if not isinstance(code, str):
             raise RulesError("A language key must be a string.")
@@ -131,28 +165,29 @@ def validate(value: Any) -> dict[str, dict[str, str]]:
             raise RulesError(f"{code!r} is not a language code (two letters, or '*').")
         if not isinstance(table, dict):
             raise RulesError(f"The rules for {code!r} must be an object of word -> replacement.")
-        rules = out.setdefault(key, {})
+        buckets = out.setdefault(key, {})
         for word, replacement in table.items():
-            if not isinstance(word, str) or not isinstance(replacement, str):
-                raise RulesError(f"The rules for {code!r} must be word -> replacement strings.")
-            word, replacement = word.strip(), replacement.strip()
-            if not word:
-                raise RulesError(f"The {code!r} rules have an empty word in them.")
-            if len(word) > MAX_WORD_LENGTH:
-                raise RulesError(f"A word in the {code!r} rules is too long.")
-            if not replacement:
-                raise RulesError(f"{word!r} has nothing to say instead.")
-            if len(replacement) > MAX_REPLACEMENT_LENGTH:
-                raise RulesError(f"The replacement for {word!r} is too long.")
-            if not _WORDISH.search(word):
-                raise RulesError(f"{word!r} has no letters or digits in it.")
-            rules[word] = replacement
-    total = sum(len(rules) for rules in out.values())
+            if isinstance(replacement, dict):
+                engine = word.strip().lower() if isinstance(word, str) else ""
+                if engine != ANY and engine not in ENGINES:
+                    raise RulesError(
+                        f"{word!r} in the {code!r} rules is not an engine "
+                        f"({', '.join(ENGINES)}, or '*').")
+                bucket = buckets.setdefault(engine, {})
+                for w, r in replacement.items():
+                    w, r = _check_rule(code, w, r)
+                    bucket[w] = r
+            else:
+                w, r = _check_rule(code, word, replacement)
+                buckets.setdefault(ANY, {})[w] = r
+    total = 0
+    for key, buckets in out.items():
+        count = sum(len(b) for b in buckets.values())
+        if count > MAX_RULES_PER_LANGUAGE:
+            raise RulesError(f"Too many rules for {key!r}; at most {MAX_RULES_PER_LANGUAGE}.")
+        total += count
     if total > MAX_RULES:
         raise RulesError(f"Too many rules ({total}); at most {MAX_RULES}.")
-    for key, rules in out.items():
-        if len(rules) > MAX_RULES_PER_LANGUAGE:
-            raise RulesError(f"Too many rules for {key!r}; at most {MAX_RULES_PER_LANGUAGE}.")
     return out
 
 
@@ -175,15 +210,27 @@ def _read() -> Any:
 # the settings is blocking I/O and this runs for every sentence the server
 # speaks, so the rules are held in memory and re-read only when the settings
 # have actually been written since.
-_cached: tuple[int, dict[str, dict[str, str]]] = (-1, {})
+_cached: tuple[int, dict[str, dict[str, dict[str, str]]]] = (-1, {})
 
 
-def _stored() -> dict[str, dict[str, str]]:
-    """The owner's rules as stored, with anything unusable dropped.
+def _usable(table: Any) -> dict[str, str]:
+    """The word -> replacement pairs in ``table`` that can be used."""
+    kept: dict[str, str] = {}
+    if isinstance(table, dict):
+        for word, replacement in table.items():
+            if (isinstance(word, str) and isinstance(replacement, str)
+                    and word.strip() and replacement.strip()):
+                kept[word.strip()] = replacement.strip()
+    return kept
+
+
+def _stored() -> dict[str, dict[str, dict[str, str]]]:
+    """The owner's rules as stored ({language: {engine: {word: replacement}}}),
+    with anything unusable dropped.
 
     The write path validates, but a rule map can also arrive from an older
-    server or a hand-edited database, and one rule that cannot be compiled
-    must not take the reading down with it.
+    server (the flat form, before rules had engines) or a hand-edited database,
+    and one rule that cannot be compiled must not take the reading down with it.
     """
     global _cached
     revision = appsettings.revision()
@@ -193,18 +240,26 @@ def _stored() -> dict[str, dict[str, str]]:
     raw = _read()
     if raw is None:
         return {}   # a failed read is not cached: try again next time
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, dict[str, str]]] = {}
     if isinstance(raw, dict):
         for code, table in raw.items():
             if not isinstance(code, str) or not isinstance(table, dict):
                 continue
-            kept: dict[str, str] = {}
-            for word, replacement in table.items():
-                if (isinstance(word, str) and isinstance(replacement, str)
-                        and word.strip() and replacement.strip()):
-                    kept[word.strip()] = replacement.strip()
-            if kept:
-                out[code.strip().lower()] = kept
+            buckets: dict[str, dict[str, str]] = {}
+            flat = _usable({w: r for w, r in table.items() if not isinstance(r, dict)})
+            if flat:
+                buckets[ANY] = flat
+            for engine, scoped in table.items():
+                if not isinstance(scoped, dict) or not isinstance(engine, str):
+                    continue
+                engine = engine.strip().lower()
+                if engine != ANY and engine not in ENGINES:
+                    continue
+                kept = _usable(scoped)
+                if kept:
+                    buckets.setdefault(engine, {}).update(kept)
+            if buckets:
+                out[code.strip().lower()] = buckets
     _cached = (revision, out)
     return out
 
@@ -224,14 +279,26 @@ def _language_of(language: Optional[str], voice: Optional[str]) -> str:
     return ""
 
 
-def rules_for(language: Optional[str] = None, voice: Optional[str] = None) -> dict[str, str]:
+def rules_for(language: Optional[str] = None, voice: Optional[str] = None,
+              engine: Optional[str] = None) -> dict[str, str]:
     """The rules that apply to this text: the ones for every language, plus
-    the ones for its own. Its own win."""
+    the ones for its own, each narrowed to ``engine`` where one is given.
+
+    Layered least to most specific, so the later layer wins a clash: "*" for
+    every engine, "*" for this engine, the language's for every engine, the
+    language's for this engine.
+    """
     stored = _stored()
-    rules = dict(stored.get(ANY) or {})
     code = _language_of(language, voice)
-    if code:
-        rules.update(stored.get(code) or {})
+    engine = (engine or "").strip().lower()
+    rules: dict[str, str] = {}
+    for lang_code in (ANY, code):
+        buckets = stored.get(lang_code) if lang_code else None
+        if not buckets:
+            continue
+        rules.update(buckets.get(ANY) or {})
+        if engine in ENGINES:
+            rules.update(buckets.get(engine) or {})
     return rules
 
 
@@ -288,10 +355,10 @@ def apply(text: str, rules: dict[str, str]) -> tuple[str, list[Edit]]:
     return "".join(parts), edits
 
 
-def plan(text: str, language: Optional[str] = None,
-         voice: Optional[str] = None) -> tuple[str, list[Edit]]:
-    """``text`` with the owner's rules for this language applied."""
-    return apply(text, rules_for(language, voice))
+def plan(text: str, language: Optional[str] = None, voice: Optional[str] = None,
+         engine: Optional[str] = None) -> tuple[str, list[Edit]]:
+    """``text`` with the owner's rules for this language and engine applied."""
+    return apply(text, rules_for(language, voice, engine))
 
 
 # -------------------------------------------------------------------- mapping

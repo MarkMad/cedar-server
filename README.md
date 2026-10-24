@@ -515,7 +515,20 @@ curl -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' 
 ```
 
 The map is `{language: {word: replacement}}`, with `"*"` for the rules that
-hold in every language. Matching is literal and whole-word — `cat` replaces
+hold in every language. A respelling that suits one engine can sound wrong on
+the other, so a language's rules can also be scoped to an engine, `kokoro` or
+`pocket` (cloned voices are Pocket), with `"*"` meaning both:
+
+```json
+{"en": {"Mr.": "Mister", "pocket": {"Kokoro": "Ko-ko-ro"}, "kokoro": {"Kokoro": "Koh-KOH-roh"}}}
+```
+
+Plain `word: replacement` entries apply to every engine, so existing rules keep
+working; the server stores and returns the nested
+`{language: {engine: {word: replacement}}}` form. When rules name the same word
+the most specific wins: language + engine, then the language's own, then `"*"`
++ engine, then `"*"`. Replacements are respelled text, not phoneme markup.
+Matching is literal and whole-word — `cat` replaces
 `cat` and `Cat`, but not `cats` — and the replacement is spoken verbatim.
 The text on the screen is left alone: only the voice changes, and the word
 highlight still lights the words the reader is looking at.

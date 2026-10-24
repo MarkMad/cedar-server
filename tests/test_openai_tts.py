@@ -187,7 +187,7 @@ def test_synthesize_raw_uses_the_bounded_pool_and_substitutions(monkeypatch):
         return _wav(), []
 
     monkeypatch.setattr(tts, "_ask_kokoro", ask)
-    monkeypatch.setattr(tts.substitute, "plan", lambda text, lang, voice: (text.replace("Dr", "Doctor"), []))
+    monkeypatch.setattr(tts.substitute, "plan", lambda text, lang, voice, engine=None: (text.replace("Dr", "Doctor"), []))
 
     async def run():
         return await asyncio.gather(tts.synthesize_raw("Dr Who one", "af_heart"),

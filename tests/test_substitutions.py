@@ -37,7 +37,32 @@ def _wav(pcm=b"\x01\x00" * 6000):
 
 def test_validate_accepts_a_language_map_and_normalises_it():
     out = substitute.validate({"EN": {"Kokoro": "Koh-KOH-roh"}, "*": {"Mr.": "Mister"}})
-    assert out == {"en": {"Kokoro": "Koh-KOH-roh"}, "*": {"Mr.": "Mister"}}
+    # The flat form means "every engine"; the canonical form says so.
+    assert out == {"en": {"*": {"Kokoro": "Koh-KOH-roh"}}, "*": {"*": {"Mr.": "Mister"}}}
+
+
+def test_validate_accepts_engine_scoped_rules_mixed_with_flat_ones():
+    out = substitute.validate({"en": {"cat": "dog", "Pocket": {"Kokoro": "Ko-ko-ro"},
+                                      "kokoro": {"Kokoro": "Koh-KOH-roh"}}})
+    assert out == {"en": {"*": {"cat": "dog"}, "pocket": {"Kokoro": "Ko-ko-ro"},
+                          "kokoro": {"Kokoro": "Koh-KOH-roh"}}}
+
+
+@pytest.mark.parametrize("bad", [
+    {"en": {"piper": {"a": "b"}}},          # not an engine
+    {"en": {"pocket": {"a": ""}}},          # nothing to say instead
+    {"en": {"pocket": {"...": "x"}}},       # no letters in the word
+    {"en": {"pocket": {"a": 3}}},           # a replacement that is not a string
+])
+def test_validate_refuses_bad_engine_rules(bad):
+    with pytest.raises(substitute.RulesError):
+        substitute.validate(bad)
+
+
+def test_validate_caps_count_the_rules_across_engines():
+    with pytest.raises(substitute.RulesError):
+        substitute.validate({"en": {"kokoro": {f"w{i}": "x" for i in range(120)},
+                                    "pocket": {f"v{i}": "x" for i in range(120)}}})
 
 
 @pytest.mark.parametrize("bad", [
@@ -101,6 +126,49 @@ def test_a_new_rule_is_in_force_at_once():
     assert substitute.rules_for(None, "af_heart") == {}
 
 
+def test_a_flat_rule_map_from_an_older_server_still_applies():
+    # Stored before rules had engines: written straight to the knob, unvalidated.
+    settings.put("substitutions", {"en": {"cat": "dog"}, "*": {"Mr.": "Mister"}})
+    for engine in (None, "kokoro", "pocket"):
+        assert substitute.rules_for(None, "af_heart", engine) == {"cat": "dog", "Mr.": "Mister"}
+
+
+def test_an_engine_scoped_rule_applies_to_that_engine_only():
+    settings.put("substitutions", {"en": {"pocket": {"Kokoro": "Ko-ko-ro"},
+                                          "kokoro": {"Kokoro": "Koh-KOH-roh"}}})
+    assert substitute.rules_for(None, "af_heart", "pocket") == {"Kokoro": "Ko-ko-ro"}
+    assert substitute.rules_for(None, "af_heart", "kokoro") == {"Kokoro": "Koh-KOH-roh"}
+    # No engine given: only the rules that hold for every engine.
+    assert substitute.rules_for(None, "af_heart") == {}
+
+
+def test_the_most_specific_rule_wins():
+    settings.put("substitutions", {
+        "*": {"*": {"w": "any-any"}, "pocket": {"w": "any-pocket", "x": "x-any-pocket"}},
+        "en": {"*": {"w": "en-any", "y": "y-en-any"}, "pocket": {"w": "en-pocket"}},
+    })
+    assert substitute.rules_for(None, "af_heart", "pocket")["w"] == "en-pocket"
+    # language-any-engine beats "*" + engine ...
+    settings.put("substitutions", {
+        "*": {"pocket": {"w": "any-pocket"}}, "en": {"*": {"w": "en-any"}}})
+    assert substitute.rules_for(None, "af_heart", "pocket")["w"] == "en-any"
+    # ... which beats "*" for every engine.
+    settings.put("substitutions", {"*": {"*": {"w": "any-any"}, "pocket": {"w": "any-pocket"}}})
+    assert substitute.rules_for(None, "af_heart", "pocket")["w"] == "any-pocket"
+    assert substitute.rules_for(None, "af_heart", "kokoro")["w"] == "any-any"
+
+
+def test_a_stored_bad_engine_bucket_is_dropped_not_fatal():
+    settings.put("substitutions", {"en": {"piper": {"a": "b"}, "pocket": {"c": 3}, "ok": "fine"}})
+    assert substitute.rules_for(None, "af_heart", "pocket") == {"ok": "fine"}
+
+
+def test_the_engine_follows_the_voice():
+    assert tts.engine_of("af_pocket_alba") == "pocket"
+    assert tts.engine_of("af_heart") == "kokoro"
+    assert tts.engine_of(None) == "kokoro"
+
+
 # --------------------------------------------------------------------- offsets
 
 def test_a_span_inside_a_substituted_word_lights_that_word():
@@ -143,7 +211,7 @@ def test_the_server_knob_takes_the_rules(client):
     body = {"substitutions": {"en": {"Kokoro": "Koh-KOH-roh"}}}
     response = client.put("/api/settings/server", headers=AUTH, json=body)
     assert response.status_code == 200
-    assert response.json()["substitutions"] == body["substitutions"]
+    assert response.json()["substitutions"] == {"en": {"*": {"Kokoro": "Koh-KOH-roh"}}}
 
     bad = client.put("/api/settings/server", headers=AUTH,
                      json={"substitutions": {"en": {"Kokoro": ""}}})

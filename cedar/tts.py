@@ -1062,6 +1062,11 @@ def is_pocket_voice(voice: str | None) -> bool:
     return voice in _POCKET_VOICES
 
 
+def engine_of(voice: str | None) -> str:
+    """The engine that speaks `voice`, as substitution rules name it."""
+    return "pocket" if is_pocket_voice(voice) else "kokoro"
+
+
 def pocket_streaming_available(voice: str | None) -> bool:
     return bool(POCKET_URL) and is_pocket_voice(voice)
 
@@ -1119,7 +1124,7 @@ async def stream_pocket(text: str, voice: str) -> AsyncIterator[bytes]:
     # The owner's substitutions, so the stream says what the rules say it
     # should. The stream carries no word timings, so there is nothing to map
     # back: it is PCM and nothing else.
-    spoken, _ = substitute.plan(text, None, voice)
+    spoken, _ = substitute.plan(text, None, voice, engine_of(voice))
     future = asyncio.get_running_loop().create_future()
     job = _StreamJob("stream:" + uuid.uuid4().hex, spoken, voice, future, asyncio.Queue(maxsize=2))
     if _closing:
@@ -1197,7 +1202,7 @@ async def synthesize_raw(text: str, voice: str) -> bytes:
     """Uncached, unaligned WAV for `text`, for callers that want the engine's
     own audio (the OpenAI-compatible /v1 API). Same substitutions and the same
     bounded slots as `synthesize`, but nothing is stored or coalesced."""
-    spoken, _ = substitute.plan(text, None, voice)
+    spoken, _ = substitute.plan(text, None, voice, engine_of(voice))
     if not _has_speech(spoken):
         return _silence_wav()
     if _closing:
@@ -1301,7 +1306,7 @@ def prefetch_document(doc_id: int, voice: str, token: object, texts: List[str]) 
         return
     # The rules are read once for the whole window: the same owner, the same
     # voice, the same rules for every sentence in it.
-    rules = substitute.rules_for(None, voice)
+    rules = substitute.rules_for(None, voice, engine_of(voice))
     for text in texts[:TTS_LOOKAHEAD]:
         spoken, _ = substitute.apply(text, rules)
         if not _has_speech(spoken):
@@ -1547,7 +1552,7 @@ async def _synth_uncached(key: str, text: str, voice: str) -> dict:
     # the words that should be spoken and the word map is built against them.
     # The edits travel with the text so the timings can be put back on the
     # reader's own words (see _process_and_store).
-    spoken, edits = substitute.plan(text, None, voice)
+    spoken, edits = substitute.plan(text, None, voice, engine_of(voice))
     if voice in _POCKET_VOICES:
         return await _synth_pocket(key, spoken, edits, voice)
     started = time.monotonic()
@@ -1659,7 +1664,7 @@ async def synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
     # The owner's substitutions, before anything else: the cache key has to
     # describe the clip that is actually going to be made, and a sentence with
     # nothing to say is silence whichever way it is written.
-    spoken, _ = substitute.plan(text, None, voice)
+    spoken, _ = substitute.plan(text, None, voice, engine_of(voice))
     # Before the cache: a divider is the same 676 bytes every time, and asking
     # Kokoro for it is what stalls playback (see _has_speech).
     if not _has_speech(spoken):
