@@ -22,6 +22,8 @@
   button:disabled { opacity:.5; cursor:default; }
   .row { display:flex; gap:8px; align-items:center; }
   .row > input[type=password] { flex:1; min-width:0; }
+  td .row > input { flex:1; min-width:0; }
+  td .row > button { flex:none; padding:7px 10px; }
   table { width:100%; border-collapse:collapse; }
   th { text-align:left; font-size:13px; color:var(--mute); font-weight:500; padding:0 4px 6px; }
   td { padding:3px 4px; vertical-align:top; }
@@ -170,6 +172,52 @@ function counts() {
   el.style.color = (total > MAX_RULES || over.length) ? "var(--bad)" : "";
 }
 
+let audio = null, audioUrl = "";
+
+function stopAudio() {
+  if (audio) { audio.pause(); audio = null; }
+  if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = ""; }
+}
+
+// Speak `text` exactly as written, in the voice this row's rule will use, with
+// no substitution applied: the original word and the replacement are heard the
+// same way, so they can be compared.
+async function play(text, row, btn) {
+  text = text.trim();
+  if (!text) { say("msg", "Nothing to play yet.", "bad"); return; }
+  stopAudio();
+  btn.disabled = true;
+  say("msg", "", "");
+  try {
+    const r = await fetch("/api/substitutions/preview", {
+      method: "POST", cache: "no-store", credentials: "omit",
+      headers: { "Authorization": "Bearer " + getKey(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text, lang: row.lang.trim().toLowerCase() || null, engine: row.engine }),
+    });
+    if (!r.ok) {
+      let d = "";
+      try { d = (await r.json()).detail; } catch (e) { /* not JSON */ }
+      if (r.status === 401) setKey("");
+      throw new Error(typeof d === "string" && d ? d : "Could not play that (" + r.status + ").");
+    }
+    audioUrl = URL.createObjectURL(await r.blob());
+    audio = new Audio(audioUrl);
+    audio.addEventListener("ended", stopAudio);
+    await audio.play();
+  } catch (e) {
+    say("msg", e.message, "bad");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function playButton(label, getText, row) {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = "▶"; b.title = label; b.setAttribute("aria-label", label);
+  b.addEventListener("click", () => play(getText(), row, b));
+  return b;
+}
+
 function cell(cls, child) { const td = document.createElement("td"); td.className = cls; td.appendChild(child); return td; }
 
 function render() {
@@ -206,8 +254,17 @@ function render() {
     const del = document.createElement("button");
     del.type = "button"; del.textContent = "×"; del.setAttribute("aria-label", "Delete rule");
     del.addEventListener("click", () => { rows.splice(i, 1); render(); });
-    const replCell = cell("repl", repl); replCell.appendChild(warn);
-    tr.append(cell("lang", lang), cell("eng", eng), cell("word", word), replCell, cell("del", del));
+    const withPlay = (input, label, text) => {
+      const box = document.createElement("div");
+      box.className = "row";
+      box.append(input, playButton(label, text, r));
+      return box;
+    };
+    const replCell = cell("repl", withPlay(repl, "Hear the replacement", () => r.repl));
+    replCell.appendChild(warn);
+    tr.append(cell("lang", lang), cell("eng", eng),
+              cell("word", withPlay(word, "Hear the original word", () => r.word)),
+              replCell, cell("del", del));
     body.appendChild(tr);
   });
   counts();

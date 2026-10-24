@@ -7,7 +7,7 @@ import re
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from .. import __version__, blends, db, lang, settings, substitute, tts
@@ -224,6 +224,54 @@ def put_server_settings(body: dict[str, Any]):
         raise HTTPException(400, f"Unknown setting: {e.args[0]}")
     except (TypeError, ValueError):
         raise HTTPException(400, "A value has the wrong type.")
+
+
+class PreviewIn(BaseModel):
+    text: str
+    # The language and engine of the rule being heard, so the voice is the one
+    # the rule will actually be spoken by. "*" or omitted: the owner's own voice.
+    lang: str | None = None
+    engine: str | None = None
+
+
+_PREVIEW_MAX_CHARS = 200
+log = logging.getLogger("cedar.system")
+
+
+def _preview_voice(language: str | None, engine: str | None) -> str:
+    """The voice a rule for this language and engine is heard in."""
+    main, _ = settings.reading_defaults()
+    code = (language or "").strip().lower()
+    code = code if code in lang.LANG_LABEL else None
+    voice = lang.resolve(code, settings.chosen_voices(), main)
+    engine = (engine or "").strip().lower()
+    if engine == "pocket" and not tts.is_pocket_voice(voice):
+        pocket = tts.pocket_voice_ids()
+        if not pocket:
+            raise HTTPException(400, "No Pocket voice is available.")
+        voice = pocket[0]
+    elif engine == "kokoro" and tts.is_pocket_voice(voice):
+        voice = lang.default_voice(code) or lang.DEFAULT_VOICE
+    return voice
+
+
+@router.post("/substitutions/preview")
+async def preview_substitution(body: PreviewIn):
+    """A word, spoken exactly as written and without any substitution rule, so
+    the owner can hear the original and a replacement side by side."""
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Nothing to say.")
+    if len(text) > _PREVIEW_MAX_CHARS:
+        raise HTTPException(413, "That is too long to preview.")
+    voice = await asyncio.to_thread(_preview_voice, body.lang, body.engine)
+    try:
+        audio = await tts.synthesize_raw(text, voice, substitutions=False)
+    except Exception:
+        # The exception text can carry the engine's internal URL.
+        log.exception("substitution preview failed")
+        raise HTTPException(502, "The voice service could not read that.")
+    return Response(audio, media_type="audio/wav")
 
 
 # ------------------------------------------------------------- client events

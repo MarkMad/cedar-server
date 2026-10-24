@@ -35,7 +35,7 @@ def _script_hash(page: str) -> str:
 
 
 _CSP = ("default-src 'none'; script-src '" + _script_hash(_PAGE) + "'; "
-        "style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; "
+        "style-src 'unsafe-inline'; connect-src 'self'; media-src blob:; base-uri 'none'; "
         "form-action 'none'; frame-ancestors 'none'")
 
 

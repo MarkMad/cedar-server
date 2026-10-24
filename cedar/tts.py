@@ -1062,6 +1062,11 @@ def is_pocket_voice(voice: str | None) -> bool:
     return voice in _POCKET_VOICES
 
 
+def pocket_voice_ids() -> list[str]:
+    """Every Pocket voice id, the owner's cloned ones included."""
+    return sorted(_POCKET_VOICES)
+
+
 def engine_of(voice: str | None) -> str:
     """The engine that speaks `voice`, as substitution rules name it."""
     return "pocket" if is_pocket_voice(voice) else "kokoro"
@@ -1198,11 +1203,17 @@ async def _run_raw_job(job: _RawJob) -> None:
         _dispatch()
 
 
-async def synthesize_raw(text: str, voice: str) -> bytes:
+async def synthesize_raw(text: str, voice: str, *, substitutions: bool = True) -> bytes:
     """Uncached, unaligned WAV for `text`, for callers that want the engine's
     own audio (the OpenAI-compatible /v1 API). Same substitutions and the same
-    bounded slots as `synthesize`, but nothing is stored or coalesced."""
-    spoken, _ = substitute.plan(text, None, voice, engine_of(voice))
+    bounded slots as `synthesize`, but nothing is stored or coalesced.
+
+    `substitutions=False` speaks `text` exactly as given, for hearing a word
+    before and after a rule (the substitution editor's preview)."""
+    if substitutions:
+        spoken, _ = substitute.plan(text, None, voice, engine_of(voice))
+    else:
+        spoken = text
     if not _has_speech(spoken):
         return _silence_wav()
     if _closing:
