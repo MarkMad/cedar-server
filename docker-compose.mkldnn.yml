@@ -1,0 +1,9 @@
+# Optional override: fixes Kokoro on Snapdragon/ARM64 by disabling MKLDNN.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.pocket.yml \
+#     -f docker-compose.arm64.yml -f docker-compose.mkldnn.yml \
+#     --profile pocket up -d
+services:
+  kokoro:
+    volumes:
+      - ./docker/kokoro/sitecustomize.py:/app/.venv/lib/python3.12/site-packages/sitecustomize.py:ro
