@@ -22,6 +22,8 @@
   button:disabled { opacity:.5; cursor:default; }
   .row { display:flex; gap:8px; align-items:center; }
   .row > input[type=password] { flex:1; min-width:0; }
+  .tabs { flex-wrap:wrap; margin:12px 0 6px; }
+  .tabs button[aria-pressed="true"] { background:var(--accent); color:#10140f; border-color:var(--accent); font-weight:600; }
   td .row > input { flex:1; min-width:0; }
   td .row > button { flex:none; padding:7px 10px; }
   table { width:100%; border-collapse:collapse; }
@@ -61,10 +63,12 @@
         <input id="filter" type="search" placeholder="Filter rows" aria-label="Filter rows" style="flex:1">
         <button id="add" type="button">Add rule</button>
       </div>
+      <div class="row tabs" id="engines" role="group" aria-label="Show rules for"></div>
       <table>
         <thead><tr><th>Lang</th><th>Engine</th><th>Word</th><th>Say instead</th><th></th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
+      <p class="hint" id="empty" hidden>No rules match this filter.</p>
       <p class="hint">Lang is a two-letter code (en, es, ...) or * for every language.
          Engine "Both" applies to Kokoro and Pocket. The most specific rule wins:
          language + engine, language, * + engine, *. Replacements are respelled text,
@@ -86,6 +90,37 @@ const BREAKING = /[\[\]{}|]|--/;
 const $ = (id) => document.getElementById(id);
 let rows = [];       // [{lang, engine, word, repl}]
 let snapshot = "";   // the server's rules as last read, canonical JSON
+let engineFilter = "all";   // "all", "kokoro", "pocket" or "*" (Both); not remembered across reloads
+const FILTERS = [["all", "All"], ["kokoro", "Kokoro"], ["pocket", "Pocket"], ["*", "Both"]];
+
+// Whether a rule applies under the filter: Kokoro shows what Kokoro says
+// (its own rules and the ones for both), Pocket likewise, Both only the
+// rules that hold for both.
+function inFilter(r, filter) {
+  if (filter === "all") return true;
+  if (filter === "*") return r.engine === "*";
+  return r.engine === filter || r.engine === "*";
+}
+
+function renderTabs() {
+  const box = $("engines");
+  // Built once and then updated in place, so a keyboard user keeps focus on
+  // the button they pressed.
+  if (!box.children.length) {
+    for (const [value] of FILTERS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.addEventListener("click", () => { engineFilter = value; render(); });
+      box.appendChild(b);
+    }
+  }
+  FILTERS.forEach(([value, label], i) => {
+    const n = rows.filter((r) => (r.word.trim() || r.repl.trim()) && inFilter(r, value)).length;
+    const b = box.children[i];
+    b.textContent = label + " (" + n + ")";
+    b.setAttribute("aria-pressed", String(value === engineFilter));
+  });
+}
 
 function getKey() { try { return sessionStorage.getItem("cedar-key") || ""; } catch (e) { return ""; } }
 function setKey(k) { try { if (k) sessionStorage.setItem("cedar-key", k); else sessionStorage.removeItem("cedar-key"); } catch (e) { /* storage blocked */ } }
@@ -170,6 +205,7 @@ function counts() {
   const el = $("counts");
   el.textContent = t;
   el.style.color = (total > MAX_RULES || over.length) ? "var(--bad)" : "";
+  renderTabs();
 }
 
 let audio = null, audioUrl = "";
@@ -224,8 +260,11 @@ function render() {
   const q = $("filter").value.trim().toLowerCase();
   const body = $("rows");
   body.replaceChildren();
+  let shown = 0;
   rows.forEach((r, i) => {
+    if (!inFilter(r, engineFilter)) return;
     if (q && !(r.lang + " " + r.word + " " + r.repl).toLowerCase().includes(q)) return;
+    shown++;
     const tr = document.createElement("tr");
     const lang = document.createElement("input");
     lang.value = r.lang; lang.maxLength = 2; lang.setAttribute("aria-label", "Language");
@@ -237,7 +276,9 @@ function render() {
       o.value = v; o.textContent = label; eng.appendChild(o);
     }
     eng.value = r.engine;
-    eng.addEventListener("change", () => { r.engine = eng.value; });
+    // No re-render here: a row edited out of the filter stays put until the
+    // filter changes or the rules are saved.
+    eng.addEventListener("change", () => { r.engine = eng.value; renderTabs(); });
     const word = document.createElement("input");
     word.value = r.word; word.maxLength = MAX_WORD; word.setAttribute("aria-label", "Word");
     word.addEventListener("input", () => { r.word = word.value; counts(); });
@@ -267,6 +308,7 @@ function render() {
               replCell, cell("del", del));
     body.appendChild(tr);
   });
+  $("empty").hidden = shown > 0;
   counts();
 }
 
@@ -299,7 +341,9 @@ $("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("load").c
 $("filter").addEventListener("input", render);
 $("add").addEventListener("click", () => {
   const last = rows[rows.length - 1];
-  rows.push({ lang: last ? last.lang : "en", engine: "*", word: "", repl: "" });
+  // A new rule takes the engine being viewed, so it does not vanish on add.
+  rows.push({ lang: last ? last.lang : "en", engine: engineFilter === "all" ? "*" : engineFilter,
+              word: "", repl: "" });
   $("filter").value = "";
   render();
   const inputs = $("rows").querySelectorAll("td.word input");
