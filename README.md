@@ -528,6 +528,15 @@ working; the server stores and returns the nested
 `{language: {engine: {word: replacement}}}` form. When rules name the same word
 the most specific wins: language + engine, then the language's own, then `"*"`
 + engine, then `"*"`. Replacements are respelled text, not phoneme markup.
+
+There is also a small editor at `http://<server>:8000/substitutions`. The page
+itself loads without the key (a browser cannot send one while navigating) but
+holds no data: paste the owner key into it and it reads and saves the rules
+through the same gated `/api/settings/server`. The key stays in that tab's
+`sessionStorage` only, and the page's Content-Security-Policy allows nothing
+external. Saving replaces the whole rule set; if the server's copy changed
+since the page loaded, it asks before overwriting.
+
 Matching is literal and whole-word — `cat` replaces
 `cat` and `Cat`, but not `cats` — and the replacement is spoken verbatim.
 The text on the screen is left alone: only the voice changes, and the word

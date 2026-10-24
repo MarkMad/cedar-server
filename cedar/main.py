@@ -29,12 +29,15 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from . import __version__, auth, db, dictionary, settings, translate, tts
 from .bodylimit import BodyLimitMiddleware
 from .config import DATA_DIR, SERVER_NAME
-from .routes import all_routers, openai
+from .routes import all_routers, openai, substitutions_page
 from .textsafe import printable
 
-# Reachable without the key: the status page (setup instructions, no secrets)
-# and the health probe the app uses to recognise a server before pairing.
-OPEN_PATHS = frozenset({"/", "/api/health"})
+# Reachable without the key: the status page (setup instructions, no secrets),
+# the health probe the app uses to recognise a server before pairing, and the
+# substitution editor's page (a browser cannot send the key while navigating to
+# it; the page holds no data and calls the gated API with the key the owner
+# types in).
+OPEN_PATHS = frozenset({"/", "/api/health", substitutions_page.PATH})
 
 
 def _configure_logging() -> None:

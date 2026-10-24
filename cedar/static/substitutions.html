@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Word substitutions</title>
+<style>
+  :root { --bg:#23262D; --fg:#EFEDE7; --mute:#B9B4A9; --card:#2E323A; --line:#454a54;
+          --accent:#8fbf8f; --bad:#e08a7a; --warn:#e0c070; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f4ee; --fg:#23262D; --mute:#5d5a52; --card:#ffffff; --line:#d4d0c4;
+            --accent:#2f6f3a; --bad:#a63a2a; --warn:#8a6a10; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  p.sub { color:var(--mute); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin:14px 0; }
+  input, select, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line);
+          border-radius:6px; padding:7px 9px; }
+  button { cursor:pointer; background:var(--card); }
+  button.primary { background:var(--accent); color:#10140f; border-color:var(--accent); font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > input[type=password] { flex:1; min-width:0; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:13px; color:var(--mute); font-weight:500; padding:0 4px 6px; }
+  td { padding:3px 4px; vertical-align:top; }
+  td input, td select { width:100%; }
+  td.lang { width:64px; } td.eng { width:104px; } td.word { width:30%; } td.del { width:42px; }
+  .msg { min-height:1.4em; margin:8px 0 0; }
+  .msg.bad { color:var(--bad); } .msg.ok { color:var(--accent); }
+  .warn { color:var(--warn); font-size:13px; }
+  .counts { color:var(--mute); font-size:14px; }
+  .hint { color:var(--mute); font-size:14px; }
+  [hidden] { display:none !important; }
+  @media (max-width:640px) {
+    thead { display:none; }
+    tr { display:grid; grid-template-columns:1fr 1fr; gap:6px; padding:8px 0; border-top:1px solid var(--line); }
+    td { display:block; width:auto !important; padding:0; }
+    td.word, td.repl { grid-column:1 / -1; }
+  }
+</style></head><body><main>
+  <h1>Word substitutions</h1>
+  <p class="sub">Say this instead of that, before the voice speaks. The text on screen is never changed.</p>
+
+  <div class="card" id="keybox">
+    <label for="key">Owner key</label>
+    <div class="row">
+      <input id="key" type="password" autocomplete="off" spellcheck="false">
+      <button id="load" class="primary" type="button">Load rules</button>
+    </div>
+    <p class="hint">Kept in this tab only and sent to this server only. Closing the tab forgets it.</p>
+    <p class="msg" id="keymsg" role="status"></p>
+  </div>
+
+  <div id="editor" hidden>
+    <div class="card">
+      <div class="row">
+        <input id="filter" type="search" placeholder="Filter rows" aria-label="Filter rows" style="flex:1">
+        <button id="add" type="button">Add rule</button>
+      </div>
+      <table>
+        <thead><tr><th>Lang</th><th>Engine</th><th>Word</th><th>Say instead</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="hint">Lang is a two-letter code (en, es, ...) or * for every language.
+         Engine "Both" applies to Kokoro and Pocket. The most specific rule wins:
+         language + engine, language, * + engine, *. Replacements are respelled text,
+         not phoneme markup.</p>
+      <p class="counts" id="counts"></p>
+    </div>
+    <div class="row">
+      <button id="save" class="primary" type="button">Save</button>
+      <button id="reload" type="button">Discard changes</button>
+    </div>
+    <p class="msg" id="msg" role="status"></p>
+  </div>
+</main>
+<script>
+"use strict";
+const ENGINES = [["*", "Both"], ["kokoro", "Kokoro"], ["pocket", "Pocket"]];
+const MAX_RULES = 500, MAX_PER_LANG = 200, MAX_WORD = 64, MAX_REPL = 200;
+const BREAKING = /[\[\]{}|]|--/;
+const $ = (id) => document.getElementById(id);
+let rows = [];       // [{lang, engine, word, repl}]
+let snapshot = "";   // the server's rules as last read, canonical JSON
+
+function getKey() { try { return sessionStorage.getItem("cedar-key") || ""; } catch (e) { return ""; } }
+function setKey(k) { try { if (k) sessionStorage.setItem("cedar-key", k); else sessionStorage.removeItem("cedar-key"); } catch (e) { /* storage blocked */ } }
+
+function sortDeep(v) {
+  if (Array.isArray(v) || v === null || typeof v !== "object") return v;
+  const out = {};
+  for (const k of Object.keys(v).sort()) out[k] = sortDeep(v[k]);
+  return out;
+}
+
+async function api(method, body) {
+  const headers = { "Authorization": "Bearer " + getKey() };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch("/api/settings/server", {
+    method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store", credentials: "omit",
+  });
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* not JSON */ }
+  if (r.status === 401) { setKey(""); throw new Error("The owner key was refused."); }
+  if (r.status === 429) throw new Error("Too many wrong keys. Try again later.");
+  if (!r.ok) {
+    let d = data && data.detail;
+    if (Array.isArray(d)) d = d.map((x) => x.msg || "").join("; ");
+    throw new Error(d || ("Server answered " + r.status + "."));
+  }
+  return data;
+}
+
+function flatten(subs) {
+  const out = [];
+  for (const lang of Object.keys(subs || {}).sort()) {
+    const buckets = subs[lang] || {};
+    for (const [word, v] of Object.entries(buckets)) {
+      if (v !== null && typeof v === "object") {
+        for (const [w, r] of Object.entries(v)) out.push({ lang, engine: word, word: w, repl: r });
+      } else {
+        out.push({ lang, engine: "*", word, repl: v });   // an older, flat rule
+      }
+    }
+  }
+  return out;
+}
+
+function build() {
+  const map = {}, seen = new Set(), problems = [];
+  rows.forEach((r, i) => {
+    const lang = r.lang.trim().toLowerCase(), word = r.word.trim(), repl = r.repl.trim();
+    if (!lang && !word && !repl) return;
+    const n = "Row " + (i + 1);
+    if (lang !== "*" && !/^[a-z]{2}$/.test(lang)) problems.push(n + ": language must be two letters or *.");
+    else if (!word) problems.push(n + ": the word is empty.");
+    else if (!repl) problems.push(n + ": nothing to say instead.");
+    else if (word.length > MAX_WORD) problems.push(n + ": the word is too long.");
+    else if (repl.length > MAX_REPL) problems.push(n + ": the replacement is too long.");
+    else if (!/[\p{L}\p{N}]/u.test(word)) problems.push(n + ": the word needs a letter or digit.");
+    else {
+      const id = lang + "\u0000" + r.engine + "\u0000" + word.toLowerCase();
+      if (seen.has(id)) { problems.push(n + ": " + word + " is already set for this language and engine."); return; }
+      seen.add(id);
+      const byEngine = map[lang] = map[lang] || {};
+      const rules = byEngine[r.engine] = byEngine[r.engine] || {};
+      rules[word] = repl;
+    }
+  });
+  return { map, problems };
+}
+
+function counts() {
+  const per = {};
+  let total = 0;
+  for (const r of rows) {
+    if (!r.word.trim() && !r.repl.trim()) continue;
+    total++;
+    const l = r.lang.trim().toLowerCase();
+    per[l] = (per[l] || 0) + 1;
+  }
+  const over = Object.entries(per).filter(([, n]) => n > MAX_PER_LANG).map(([l]) => l);
+  let t = total + " of " + MAX_RULES + " rules";
+  if (over.length) t += "; over " + MAX_PER_LANG + " for: " + over.join(", ");
+  const el = $("counts");
+  el.textContent = t;
+  el.style.color = (total > MAX_RULES || over.length) ? "var(--bad)" : "";
+}
+
+function cell(cls, child) { const td = document.createElement("td"); td.className = cls; td.appendChild(child); return td; }
+
+function render() {
+  const q = $("filter").value.trim().toLowerCase();
+  const body = $("rows");
+  body.replaceChildren();
+  rows.forEach((r, i) => {
+    if (q && !(r.lang + " " + r.word + " " + r.repl).toLowerCase().includes(q)) return;
+    const tr = document.createElement("tr");
+    const lang = document.createElement("input");
+    lang.value = r.lang; lang.maxLength = 2; lang.setAttribute("aria-label", "Language");
+    lang.addEventListener("input", () => { r.lang = lang.value; counts(); });
+    const eng = document.createElement("select");
+    eng.setAttribute("aria-label", "Engine");
+    for (const [v, label] of ENGINES) {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = label; eng.appendChild(o);
+    }
+    eng.value = r.engine;
+    eng.addEventListener("change", () => { r.engine = eng.value; });
+    const word = document.createElement("input");
+    word.value = r.word; word.maxLength = MAX_WORD; word.setAttribute("aria-label", "Word");
+    word.addEventListener("input", () => { r.word = word.value; counts(); });
+    const repl = document.createElement("input");
+    repl.value = r.repl; repl.maxLength = MAX_REPL; repl.setAttribute("aria-label", "Say instead");
+    const warn = document.createElement("div");
+    warn.className = "warn";
+    const check = () => {
+      warn.textContent = BREAKING.test(repl.value)
+        ? "[ ] { } | and -- are rewritten before Kokoro speaks, and can break word highlighting." : "";
+    };
+    repl.addEventListener("input", () => { r.repl = repl.value; check(); counts(); });
+    check();
+    const del = document.createElement("button");
+    del.type = "button"; del.textContent = "×"; del.setAttribute("aria-label", "Delete rule");
+    del.addEventListener("click", () => { rows.splice(i, 1); render(); });
+    const replCell = cell("repl", repl); replCell.appendChild(warn);
+    tr.append(cell("lang", lang), cell("eng", eng), cell("word", word), replCell, cell("del", del));
+    body.appendChild(tr);
+  });
+  counts();
+}
+
+function say(id, text, kind) { const el = $(id); el.textContent = text; el.className = "msg" + (kind ? " " + kind : ""); }
+
+async function load(announce) {
+  say("keymsg", "Loading...", "");
+  try {
+    const data = await api("GET");
+    snapshot = JSON.stringify(sortDeep(data.substitutions || {}));
+    rows = flatten(data.substitutions);
+    $("editor").hidden = false;
+    say("keymsg", "", "");
+    if (announce) say("msg", "Rules loaded.", "ok");
+    render();
+  } catch (e) {
+    $("editor").hidden = true;
+    say("keymsg", e.message, "bad");
+  }
+}
+
+$("load").addEventListener("click", () => {
+  const k = $("key").value.trim();
+  if (!k) { say("keymsg", "Enter the owner key.", "bad"); return; }
+  setKey(k);
+  $("key").value = "";
+  load(false);
+});
+$("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("load").click(); });
+$("filter").addEventListener("input", render);
+$("add").addEventListener("click", () => {
+  const last = rows[rows.length - 1];
+  rows.push({ lang: last ? last.lang : "en", engine: "*", word: "", repl: "" });
+  $("filter").value = "";
+  render();
+  const inputs = $("rows").querySelectorAll("td.word input");
+  if (inputs.length) inputs[inputs.length - 1].focus();
+});
+$("reload").addEventListener("click", () => load(true));
+
+$("save").addEventListener("click", async () => {
+  const { map, problems } = build();
+  if (problems.length) { say("msg", problems.slice(0, 3).join(" "), "bad"); return; }
+  $("save").disabled = true;
+  say("msg", "Saving...", "");
+  try {
+    // Saving replaces the whole map, so look first: someone else may have
+    // changed it since this page loaded.
+    const now = JSON.stringify(sortDeep((await api("GET")).substitutions || {}));
+    if (now !== snapshot && !confirm("The rules on the server changed since this page loaded. Overwrite them?")) {
+      say("msg", "Not saved. Use Discard changes to load the server's rules.", "bad");
+      return;
+    }
+    const saved = await api("PUT", { substitutions: map });
+    snapshot = JSON.stringify(sortDeep(saved.substitutions || {}));
+    rows = flatten(saved.substitutions);
+    render();
+    say("msg", "Saved. New rules apply to the next sentence spoken.", "ok");
+  } catch (e) {
+    say("msg", e.message, "bad");
+    if (!getKey()) { $("editor").hidden = true; say("keymsg", e.message, "bad"); }
+  } finally {
+    $("save").disabled = false;
+  }
+});
+
+if (getKey()) load(false);
+</script></body></html>
