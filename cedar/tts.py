@@ -1012,6 +1012,7 @@ class _StreamJob:
     future: asyncio.Future
     queue: asyncio.Queue
     queued_at: float = field(default_factory=time.monotonic)
+    timing: bool = False  # add a `timing` object to the end frame
 
 
 @dataclass
@@ -1107,10 +1108,19 @@ async def _run_stream_job(job: _StreamJob) -> None:
                                          "audio_b64": base64.b64encode(pcm).decode("ascii")})
                     frames += 1
                     total += len(pcm)
-        job.future.set_result({"type": "end", "audio_frames": frames, "pcm_bytes": total,
-                               "samples": total // 2, "duration": total / 48_000})
+        end = {"type": "end", "audio_frames": frames, "pcm_bytes": total,
+               "samples": total // 2, "duration": total / 48_000}
+        elapsed = time.monotonic() - started
+        if job.timing:
+            # Elapsed includes time spent waiting on a slow consumer (the queue
+            # is bounded), so this is the rate the client actually received.
+            end["timing"] = {"queue_s": round(started - job.queued_at, 3),
+                             "first_pcm_s": None if first_pcm_s is None else round(first_pcm_s, 3),
+                             "elapsed_s": round(elapsed, 3), "audio_s": round(end["duration"], 3),
+                             "rtf": round(elapsed / end["duration"], 3) if end["duration"] > 0 else None}
+        job.future.set_result(end)
         log.info("tts stream completed queue_s=%.3f elapsed_s=%.3f pcm_bytes=%d",
-                 started - job.queued_at, time.monotonic() - started, total)
+                 started - job.queued_at, elapsed, total)
     except asyncio.CancelledError:
         job.future.cancel()
         raise
@@ -1124,14 +1134,18 @@ async def _run_stream_job(job: _StreamJob) -> None:
         _dispatch()
 
 
-async def stream_pocket(text: str, voice: str) -> AsyncIterator[bytes]:
-    """Foreground PCM stream; closing it cancels only its own upstream job."""
+async def stream_pocket(text: str, voice: str, timing: bool = False) -> AsyncIterator[bytes]:
+    """Foreground PCM stream; closing it cancels only its own upstream job.
+
+    `timing` adds queue/first-audio/elapsed seconds and the real-time factor to
+    the `end` frame."""
     # The owner's substitutions, so the stream says what the rules say it
     # should. The stream carries no word timings, so there is nothing to map
     # back: it is PCM and nothing else.
     spoken, _ = substitute.plan(text, None, voice, engine_of(voice))
     future = asyncio.get_running_loop().create_future()
-    job = _StreamJob("stream:" + uuid.uuid4().hex, spoken, voice, future, asyncio.Queue(maxsize=2))
+    job = _StreamJob("stream:" + uuid.uuid4().hex, spoken, voice, future, asyncio.Queue(maxsize=2),
+                     timing=timing)
     if _closing:
         yield b'{"type":"error","code":"voice_service_failed"}\n'
         return

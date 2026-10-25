@@ -94,5 +94,6 @@ async def speak_stream(body: SpeakIn):
         raise HTTPException(400, "Choose an explicit Pocket voice for streaming.")
     if not tts.pocket_streaming_available(body.voice):
         raise HTTPException(503, "Pocket streaming is not configured.")
-    return StreamingResponse(tts.stream_pocket(text, body.voice), media_type="application/x-ndjson",
+    return StreamingResponse(tts.stream_pocket(text, body.voice, timing=body.timing),
+                             media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

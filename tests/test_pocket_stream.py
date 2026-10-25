@@ -352,3 +352,34 @@ def test_route_auth_validation_and_opt_in(client, monkeypatch):
     monkeypatch.setattr(tts, "POCKET_URL", "")
     assert client.post(path, headers=AUTH, json={"text": "Hello", "voice": VOICE}).status_code == 503
     assert client.post("/api/live/tts", headers=AUTH, json={"text": "Hello"}).json()["format"] == "mp3"
+
+
+def test_end_frame_carries_timing_only_when_asked(monkeypatch):
+    async def run():
+        backend(monkeypatch, Source([wav()]))
+        plain = (await collect())[-1]
+        assert "timing" not in plain
+
+        backend(monkeypatch, Source([wav()]))
+        asked = [json.loads(f) async for f in tts.stream_pocket("Hello there", VOICE, timing=True)][-1]
+        timing = asked.pop("timing")
+        assert asked == plain
+        assert set(timing) == {"queue_s", "first_pcm_s", "elapsed_s", "audio_s", "rtf"}
+        assert timing["audio_s"] == 0.25 and timing["first_pcm_s"] is not None
+        assert timing["rtf"] == pytest.approx(timing["elapsed_s"] / 0.25, abs=0.01)
+    asyncio.run(run())
+
+
+def test_route_passes_timing_to_the_stream(client, monkeypatch):
+    seen = []
+
+    async def fake(text, voice, timing=False):
+        seen.append(timing)
+        yield b'{"type":"end"}\n'
+
+    monkeypatch.setattr(tts, "stream_pocket", fake)
+    monkeypatch.setattr(tts, "POCKET_URL", "http://pocket.invalid")
+    path = "/api/live/tts/stream"
+    client.post(path, headers=AUTH, json={"text": "Hello", "voice": VOICE})
+    client.post(path, headers=AUTH, json={"text": "Hello", "voice": VOICE, "timing": True})
+    assert seen == [False, True]
