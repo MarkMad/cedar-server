@@ -1253,6 +1253,17 @@ def _silence_wav(seconds: float = 0.25) -> bytes:
     return buf.getvalue()
 
 
+def _timing_payload(cached: bool, queue_s: float, synth_s: float, processing_s: float,
+                    audio_s: float, rtf: float) -> dict:
+    """What a client may ask for with `timing`. A cache read says nothing about
+    how fast the engine is, so a hit reports no real-time factor."""
+    if cached:
+        return {"cached": True, "audio_s": round(audio_s, 3), "rtf": None}
+    return {"cached": False, "queue_s": round(queue_s, 3), "synth_s": round(synth_s, 3),
+            "processing_s": round(processing_s, 3), "audio_s": round(audio_s, 3),
+            "rtf": round(rtf, 3) if audio_s > 0 else None}
+
+
 async def _run_job(job: _SynthesisJob) -> None:
     queue_s = time.monotonic() - job.queued_at
     started = time.monotonic()
@@ -1266,10 +1277,13 @@ async def _run_job(job: _SynthesisJob) -> None:
         elapsed = time.monotonic() - started
         synth_s, processing_s = result.pop("_timing", (0.0, elapsed))
         duration = float(result.get("duration", 0))
+        rtf = elapsed / duration if duration > 0 else 0.0
         log.info("tts completed key=%s source=%s cached=%s queue_s=%.3f elapsed_s=%.3f "
                  "synth_s=%.3f processing_s=%.3f audio_s=%.3f rtf=%.3f",
                  job.key[:12], source, cached is not None, queue_s, elapsed,
-                 synth_s, processing_s, duration, elapsed / duration if duration > 0 else 0.0)
+                 synth_s, processing_s, duration, rtf)
+        result["timing"] = _timing_payload(cached is not None, queue_s, synth_s, processing_s,
+                                           duration, rtf)
         job.future.set_result(result)
     except asyncio.CancelledError:
         job.future.cancel()
@@ -1666,12 +1680,23 @@ def _silence_payload() -> dict:
             "audio_b64": base64.b64encode(_SILENCE_MP3).decode("ascii")}
 
 
-async def synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
+async def synthesize(text: str, voice: str, speed: float = 1.0, timing: bool = False) -> dict:
     """Return {format, audio_b64, words:[{start,end,cs,ce}], duration}. Cached on disk.
 
     `speed` is accepted for API compatibility but ignored: audio is always
     generated at 1.0× and clients set their player's playback rate instead.
+    `timing` adds a `timing` object (see _timing_payload) for the caller that asked.
     """
+    result = await _synthesize(text, voice)
+    if not timing:
+        result.pop("timing", None)
+    elif "timing" not in result:
+        # A cache hit or a silent clip: the work was a lookup, not synthesis.
+        result["timing"] = _timing_payload(True, 0.0, 0.0, 0.0, float(result.get("duration", 0)), 0.0)
+    return result
+
+
+async def _synthesize(text: str, voice: str) -> dict:
     # The owner's substitutions, before anything else: the cache key has to
     # describe the clip that is actually going to be made, and a sentence with
     # nothing to say is silence whichever way it is written.

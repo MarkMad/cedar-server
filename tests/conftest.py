@@ -29,10 +29,12 @@ AUTH = {"Authorization": f"Bearer {KEY}"}
 TTS_AUTH = {"Authorization": f"Bearer {os.environ['CEDAR_TTS_KEY']}"}
 
 
-async def _fake_synthesize(text: str, voice: str, speed: float = 1.0) -> dict:
+async def _fake_synthesize(text: str, voice: str, speed: float = 1.0, timing: bool = False) -> dict:
     words = text.split()
     step = 0.3
+    extra = {"timing": {"cached": False, "rtf": 0.1}} if timing else {}
     return {
+        **extra,
         "format": "mp3",
         "audio_b64": base64.b64encode(b"\xff\xfb\x90\x00" + b"\0" * 64).decode(),
         "words": [{"start": i * step, "end": i * step + 0.25, "cs": -1, "ce": -1}

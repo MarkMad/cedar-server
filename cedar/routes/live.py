@@ -34,6 +34,7 @@ class PageIn(BaseModel):
 class SpeakIn(BaseModel):
     text: str
     voice: str | None = None
+    timing: bool = False  # opt in to synthesis timings and the real-time factor
 
 
 def _sentence_text(body: SpeakIn) -> str:
@@ -77,7 +78,7 @@ async def speak(body: SpeakIn):
     text = _sentence_text(body)
     main, _ = settings.reading_defaults()
     try:
-        return await tts.synthesize(text, body.voice or main)
+        return await tts.synthesize(text, body.voice or main, timing=body.timing)
     except Exception:
         # The exception text can carry the engine's internal URL; keep that in
         # the server log and give the client only the fact.
