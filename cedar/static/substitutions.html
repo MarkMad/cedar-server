@@ -31,7 +31,10 @@
   th { text-align:left; font-size:13px; color:var(--mute); font-weight:500; padding:0 4px 6px; }
   td { padding:3px 4px; vertical-align:top; }
   td input, td select { width:100%; }
-  td.lang { width:64px; } td.eng { width:104px; } td.word { width:30%; } td.del { width:42px; }
+  td.lang { width:64px; } td.eng { width:104px; } td.word { width:30%; } td.case { width:64px; } td.del { width:42px; }
+  td.case label { display:flex; align-items:center; gap:6px; padding-top:7px; }
+  td.case input { width:auto; }
+  td.case span { display:none; }
   .msg { min-height:1.4em; margin:8px 0 0; }
   .msg.bad { color:var(--bad); } .msg.ok { color:var(--accent); }
   .warn { color:var(--warn); font-size:13px; }
@@ -43,6 +46,7 @@
     tr { display:grid; grid-template-columns:1fr 1fr; gap:6px; padding:8px 0; border-top:1px solid var(--line); }
     td { display:block; width:auto !important; padding:0; }
     td.word, td.repl { grid-column:1 / -1; }
+    td.case span { display:inline; }
   }
 </style></head><body><main>
   <h1>Word substitutions</h1>
@@ -66,14 +70,15 @@
       </div>
       <div class="row tabs" id="engines" role="group" aria-label="Show rules for"></div>
       <table>
-        <thead><tr><th>Lang</th><th>Engine</th><th>Word</th><th>Say instead</th><th></th></tr></thead>
+        <thead><tr><th>Lang</th><th>Engine</th><th>Word</th><th>Say instead</th><th title="Only replace the word when it is written exactly like this">Match case</th><th></th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <p class="hint" id="empty" hidden>No rules match this filter.</p>
       <p class="hint">Lang is a two-letter code (en, es, ...) or * for every language.
          Engine "Both" applies to Kokoro and Pocket. The most specific rule wins:
          language + engine, language, * + engine, *. Replacements are respelled text,
-         not phoneme markup.</p>
+         not phoneme markup. Match case replaces "US" but not "us"; where a case-matching
+         and an ordinary rule both fit the same word in one layer, the case-matching one is used.</p>
       <p class="counts" id="counts"></p>
     </div>
     <div class="row">
@@ -92,7 +97,7 @@ const ENGINES = [["*", "Both"], ["kokoro", "Kokoro"], ["pocket", "Pocket"]];
 const MAX_RULES = 500, MAX_PER_LANG = 200, MAX_WORD = 64, MAX_REPL = 200;
 const BREAKING = /[\[\]{}|]|--/;
 const $ = (id) => document.getElementById(id);
-let rows = [];       // [{lang, engine, word, repl}]
+let rows = [];       // [{lang, engine, word, repl, matchCase}]
 let snapshot = "";   // the server's rules as last read, canonical JSON
 let engineFilter = "all";   // "all", "kokoro", "pocket" or "*" (Both); not remembered across reloads
 const FILTERS = [["all", "All"], ["kokoro", "Kokoro"], ["pocket", "Pocket"], ["*", "Both"]];
@@ -155,15 +160,25 @@ async function api(method, body) {
   return data;
 }
 
+// One rule is a string, or {to, case} for a rule that matches case. An engine's
+// table of rules is an object too, but only ever holds strings, so a "case"
+// that is not one gives the rule away.
+const isRule = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
+  && "case" in v && typeof v.case !== "string";
+
 function flatten(subs) {
   const out = [];
+  const add = (lang, engine, word, v) => {
+    if (isRule(v)) out.push({ lang, engine, word, repl: v.to, matchCase: v.case === true });
+    else out.push({ lang, engine, word, repl: v, matchCase: false });
+  };
   for (const lang of Object.keys(subs || {}).sort()) {
     const buckets = subs[lang] || {};
     for (const [word, v] of Object.entries(buckets)) {
-      if (v !== null && typeof v === "object") {
-        for (const [w, r] of Object.entries(v)) out.push({ lang, engine: word, word: w, repl: r });
+      if (v !== null && typeof v === "object" && !isRule(v)) {
+        for (const [w, r] of Object.entries(v)) add(lang, word, w, r);
       } else {
-        out.push({ lang, engine: "*", word, repl: v });   // an older, flat rule
+        add(lang, "*", word, v);   // an older, flat rule
       }
     }
   }
@@ -183,12 +198,19 @@ function build() {
     else if (repl.length > MAX_REPL) problems.push(n + ": the replacement is too long.");
     else if (!/[\p{L}\p{N}]/u.test(word)) problems.push(n + ": the word needs a letter or digit.");
     else {
-      const id = lang + "\u0000" + r.engine + "\u0000" + word.toLowerCase();
-      if (seen.has(id)) { problems.push(n + ": " + word + " is already set for this language and engine."); return; }
-      seen.add(id);
+      // The same word twice is one rule too many, and so are two rules that
+      // ignore case and differ only in it. "US" (match case) beside "us" is fine.
+      const where = lang + "\u0000" + r.engine + "\u0000";
+      const ids = [where + "=" + word];
+      if (!r.matchCase) ids.push(where + "~" + word.toLowerCase());
+      if (ids.some((id) => seen.has(id))) {
+        problems.push(n + ": " + word + " is already set for this language and engine.");
+        return;
+      }
+      ids.forEach((id) => seen.add(id));
       const byEngine = map[lang] = map[lang] || {};
       const rules = byEngine[r.engine] = byEngine[r.engine] || {};
-      rules[word] = repl;
+      rules[word] = r.matchCase ? { to: repl, case: true } : repl;
     }
   });
   return { map, problems };
@@ -307,9 +329,18 @@ function render() {
     };
     const replCell = cell("repl", withPlay(repl, "Hear the replacement", () => r.repl));
     replCell.appendChild(warn);
+    const matchCase = document.createElement("input");
+    matchCase.type = "checkbox"; matchCase.checked = !!r.matchCase;
+    matchCase.addEventListener("change", () => { r.matchCase = matchCase.checked; });
+    const caseLabel = document.createElement("label");
+    const caseText = document.createElement("span");
+    caseText.textContent = "Match case";
+    caseLabel.title = "Only replace the word when it is written exactly like this";
+    caseLabel.append(matchCase, caseText);
+    matchCase.setAttribute("aria-label", "Match case");
     tr.append(cell("lang", lang), cell("eng", eng),
               cell("word", withPlay(word, "Hear the original word", () => r.word)),
-              replCell, cell("del", del));
+              replCell, cell("case", caseLabel), cell("del", del));
     body.appendChild(tr);
   });
   $("empty").hidden = shown > 0;
@@ -347,7 +378,7 @@ $("add").addEventListener("click", () => {
   const last = rows[rows.length - 1];
   // A new rule takes the engine being viewed, so it does not vanish on add.
   rows.push({ lang: last ? last.lang : "en", engine: engineFilter === "all" ? "*" : engineFilter,
-              word: "", repl: "" });
+              word: "", repl: "", matchCase: false });
   $("filter").value = "";
   render();
   const inputs = $("rows").querySelectorAll("td.word input");
@@ -390,20 +421,27 @@ function rowsFromImport(data) {
   }
   if (!isMap(data)) throw new Error("This is not a Cedar substitutions file.");
   const out = [];
+  // One rule: text, or {to, case} for a rule that matches case.
+  const rule = (lang, engine, word, value) => {
+    let repl = value, matchCase = false;
+    if (isRule(value)) {
+      if (typeof value.case !== "boolean") {
+        throw new Error("The case flag for " + JSON.stringify(word) + " must be true or false.");
+      }
+      repl = value.to; matchCase = value.case;
+    }
+    if (typeof repl !== "string") throw new Error("The replacement for " + JSON.stringify(word) + " is not text.");
+    out.push({ lang: lang.trim().toLowerCase(), engine, word: word.trim(), repl: repl.trim(), matchCase });
+  };
   for (const [lang, table] of Object.entries(data)) {
     if (!isMap(table)) throw new Error("The rules for " + JSON.stringify(lang) + " are not a table.");
     for (const [key, value] of Object.entries(table)) {
-      if (isMap(value)) {
+      if (isMap(value) && !isRule(value)) {
         const engine = key.trim().toLowerCase();
         if (!ENGINE_KEYS.includes(engine)) throw new Error(JSON.stringify(key) + " is not an engine.");
-        for (const [word, repl] of Object.entries(value)) {
-          if (typeof repl !== "string") throw new Error("The replacement for " + JSON.stringify(word) + " is not text.");
-          out.push({ lang: lang.trim().toLowerCase(), engine, word: word.trim(), repl: repl.trim() });
-        }
-      } else if (typeof value === "string") {
-        out.push({ lang: lang.trim().toLowerCase(), engine: "*", word: key.trim(), repl: value.trim() });
+        for (const [word, v] of Object.entries(value)) rule(lang, engine, word, v);
       } else {
-        throw new Error("The replacement for " + JSON.stringify(key) + " is not text.");
+        rule(lang, "*", key, value);
       }
     }
   }
@@ -424,16 +462,27 @@ $("importfile").addEventListener("change", async () => {
     let data;
     try { data = JSON.parse(await file.text()); } catch (e) { throw new Error("That file is not valid JSON."); }
     const incoming = rowsFromImport(data);
-    const index = new Map(rows.map((r, i) => [
-      r.lang.trim().toLowerCase() + "\u0000" + r.engine + "\u0000" + r.word.trim().toLowerCase(), i]));
+    // A rule is the same rule when it has the exact same word, or when both
+    // ignore case and the words differ only in it.
+    const exact = new Map(), folded = new Map();
+    const track = (r, i) => {
+      const where = r.lang.trim().toLowerCase() + "\u0000" + r.engine + "\u0000";
+      exact.set(where + r.word.trim(), i);
+      if (!r.matchCase) folded.set(where + r.word.trim().toLowerCase(), i);
+    };
+    rows.forEach(track);
     let added = 0, changed = 0;
     for (const n of incoming) {
-      const id = n.lang + "\u0000" + n.engine + "\u0000" + n.word.toLowerCase();
-      if (index.has(id)) {
-        const r = rows[index.get(id)];
-        if (r.repl.trim() !== n.repl) { r.repl = n.repl; changed++; }
+      const where = n.lang + "\u0000" + n.engine + "\u0000";
+      let at = exact.get(where + n.word);
+      if (at === undefined && !n.matchCase) at = folded.get(where + n.word.toLowerCase());
+      if (at !== undefined) {
+        const r = rows[at];
+        if (r.repl.trim() !== n.repl || !!r.matchCase !== n.matchCase) {
+          r.repl = n.repl; r.matchCase = n.matchCase; changed++;
+        }
       } else {
-        rows.push(n); index.set(id, rows.length - 1); added++;
+        rows.push(n); track(n, rows.length - 1); added++;
       }
     }
     render();

@@ -33,6 +33,11 @@ def _wav(pcm=b"\x01\x00" * 6000):
             + fmt + b"data" + struct.pack("<I", size) + pcm)
 
 
+def _said(rules):
+    """The replacement each word gets, without the flags that travel with it."""
+    return {word: rule.to for word, rule in rules.items()}
+
+
 # ------------------------------------------------------------------ validation
 
 def test_validate_accepts_a_language_map_and_normalises_it():
@@ -63,6 +68,40 @@ def test_validate_caps_count_the_rules_across_engines():
     with pytest.raises(substitute.RulesError):
         substitute.validate({"en": {"kokoro": {f"w{i}": "x" for i in range(120)},
                                     "pocket": {f"v{i}": "x" for i in range(120)}}})
+
+
+def test_validate_keeps_a_case_matching_rule_and_stores_a_plain_one_as_a_string():
+    out = substitute.validate({"en": {"US": {"to": "United States", "case": True},
+                                      "Ave.": {"to": "Avenue", "case": False},
+                                      "kokoro": {"Kokoro": {"to": "Koh-KOH-roh", "case": True}}}})
+    assert out == {"en": {"*": {"US": {"to": "United States", "case": True}, "Ave.": "Avenue"},
+                          "kokoro": {"Kokoro": {"to": "Koh-KOH-roh", "case": True}}}}
+
+
+def test_a_case_matching_rule_for_a_word_named_like_an_engine_is_a_rule_not_a_bucket():
+    out = substitute.validate({"en": {"kokoro": {"to": "Koh-KOH-roh", "case": True}}})
+    assert out == {"en": {"*": {"kokoro": {"to": "Koh-KOH-roh", "case": True}}}}
+    # Without the flag it is still an engine's table, so a word "to" works there.
+    assert substitute.validate({"en": {"kokoro": {"to": "too"}}}) == {"en": {"kokoro": {"to": "too"}}}
+
+
+@pytest.mark.parametrize("bad", [
+    {"en": {"US": {"to": "United States", "case": "yes"}}},        # the flag is not a bool
+    {"en": {"US": {"to": "United States", "case": 1}}},
+    {"en": {"US": {"case": True}}},                                # nothing to say instead
+    {"en": {"US": {"to": "", "case": True}}},
+    {"en": {"US": {"to": 3, "case": True}}},
+    {"en": {"US": {"to": "United States", "case": True, "extra": 1}}},
+    {"en": {"pocket": {"...": {"to": "x", "case": True}}}},        # no letters in the word
+])
+def test_validate_refuses_a_bad_case_rule(bad):
+    with pytest.raises(substitute.RulesError):
+        substitute.validate(bad)
+
+
+def test_validate_caps_count_case_matching_rules():
+    with pytest.raises(substitute.RulesError):
+        substitute.validate({"en": {f"w{i}": {"to": "x", "case": True} for i in range(201)}})
 
 
 @pytest.mark.parametrize("bad", [
@@ -104,14 +143,84 @@ def test_a_rule_is_not_applied_inside_a_longer_word():
     assert edits == []
 
 
+def test_a_case_matching_rule_replaces_only_its_own_case():
+    rules = {"US": substitute.Rule("United States", True)}
+    spoken, edits = substitute.apply("The US and us, US.", rules)
+    assert spoken == "The United States and us, United States."
+    assert [(e.orig_start, e.orig_end) for e in edits] == [(4, 6), (15, 17)]
+    # Compared character for character: no casefolding, not even for ß.
+    assert substitute.apply("STRASSE", {"Straße": substitute.Rule("street", True)}) == ("STRASSE", [])
+    # Whole words still.
+    assert substitute.apply("USA", rules) == ("USA", [])
+
+
+def test_a_plain_string_rule_still_ignores_case():
+    assert substitute.apply("Cat CAT cat", {"Cat": "dog"})[0] == "dog dog dog"
+    assert substitute.apply("Cat CAT cat", {"Cat": substitute.Rule("dog")})[0] == "dog dog dog"
+
+
+def test_a_case_matching_rule_wins_a_tie_within_a_layer():
+    rules = {"us": substitute.Rule("we"), "US": substitute.Rule("United States", True)}
+    assert substitute.apply("US us Us", rules)[0] == "United States we we"
+    # The order the rules are given in does not matter.
+    flipped = dict(reversed(list(rules.items())))
+    assert substitute.apply("US us Us", flipped)[0] == "United States we we"
+
+
+def test_the_more_specific_layer_wins_before_case_does():
+    settings.put("substitutions", {
+        "*": {"US": {"to": "United States", "case": True}},
+        "en": {"us": "we"},
+    })
+    rules = substitute.rules_for(None, "af_heart")
+    assert substitute.apply("US us", rules)[0] == "we we"
+    # Another language has only the "*" rule.
+    assert substitute.apply("US us", substitute.rules_for(None, "ef_dora"))[0] == "United States us"
+
+
+def test_the_same_word_in_a_more_specific_layer_replaces_the_flag_too():
+    settings.put("substitutions", {
+        "*": {"US": {"to": "United States", "case": True}},
+        "en": {"US": "us"},
+    })
+    rule = substitute.rules_for(None, "af_heart")["US"]
+    assert (rule.to, rule.case) == ("us", False)
+
+
+def test_a_case_matching_rule_stored_under_an_engine_word_is_read_back():
+    # "kokoro" the word, not the engine: a rule object, not a table of rules.
+    settings.put("substitutions", {"en": {"kokoro": {"to": "Koh-KOH-roh", "case": True},
+                                          "pocket": {"Ave.": "Avenue"}}})
+    rules = substitute.rules_for(None, "af_heart", "pocket")
+    assert (rules["kokoro"].to, rules["kokoro"].case) == ("Koh-KOH-roh", True)
+    assert rules["Ave."].to == "Avenue"
+    assert substitute.rules_for(None, "af_heart", "kokoro")["kokoro"].case is True
+
+
+def test_a_stored_malformed_case_rule_is_dropped_not_fatal():
+    settings.put("substitutions", {"en": {"US": {"to": "United States", "case": "yes"},
+                                          "ok": "fine"}})
+    assert _said(substitute.rules_for(None, "af_heart")) == {"ok": "fine"}
+
+
+def test_edits_stay_correct_with_case_matching_and_plain_rules_mixed():
+    rules = {"US": substitute.Rule("United States", True), "cat": substitute.Rule("dog")}
+    original = "US Cat us"
+    spoken, edits = substitute.apply(original, rules)
+    assert spoken == "United States dog us"
+    assert substitute.to_original(edits, 0, 13) == (0, 2)      # "United States" lights "US"
+    assert substitute.to_original(edits, 14, 17) == (3, 6)     # "dog" lights "Cat"
+    assert substitute.to_original(edits, 18, 20) == (7, 9)     # "us" keeps its own span
+
+
 def test_the_language_bucket_and_the_any_bucket():
     settings.put("substitutions", {"*": {"a": "A"}, "es": {"b": "B"}})
     # The voice says which language this is; "af_heart" is English, "ef_dora"
     # is Spanish.
-    assert substitute.rules_for(None, "ef_dora") == {"a": "A", "b": "B"}
-    assert substitute.rules_for(None, "af_heart") == {"a": "A"}
+    assert _said(substitute.rules_for(None, "ef_dora")) == {"a": "A", "b": "B"}
+    assert _said(substitute.rules_for(None, "af_heart")) == {"a": "A"}
     # An explicit language wins over the voice.
-    assert substitute.rules_for("es", "af_heart") == {"a": "A", "b": "B"}
+    assert _said(substitute.rules_for("es", "af_heart")) == {"a": "A", "b": "B"}
 
 
 def test_a_new_rule_is_in_force_at_once():
@@ -119,27 +228,27 @@ def test_a_new_rule_is_in_force_at_once():
     # seen the moment it is written rather than whenever the cache happens
     # to be refreshed.
     settings.put("substitutions", {"en": {"cat": "dog"}})
-    assert substitute.rules_for(None, "af_heart") == {"cat": "dog"}
+    assert _said(substitute.rules_for(None, "af_heart")) == {"cat": "dog"}
     settings.put("substitutions", {"en": {"cat": "dog", "bird": "plane"}})
-    assert substitute.rules_for(None, "af_heart") == {"cat": "dog", "bird": "plane"}
+    assert _said(substitute.rules_for(None, "af_heart")) == {"cat": "dog", "bird": "plane"}
     settings.put("substitutions", {})
-    assert substitute.rules_for(None, "af_heart") == {}
+    assert _said(substitute.rules_for(None, "af_heart")) == {}
 
 
 def test_a_flat_rule_map_from_an_older_server_still_applies():
     # Stored before rules had engines: written straight to the knob, unvalidated.
     settings.put("substitutions", {"en": {"cat": "dog"}, "*": {"Mr.": "Mister"}})
     for engine in (None, "kokoro", "pocket"):
-        assert substitute.rules_for(None, "af_heart", engine) == {"cat": "dog", "Mr.": "Mister"}
+        assert _said(substitute.rules_for(None, "af_heart", engine)) == {"cat": "dog", "Mr.": "Mister"}
 
 
 def test_an_engine_scoped_rule_applies_to_that_engine_only():
     settings.put("substitutions", {"en": {"pocket": {"Kokoro": "Ko-ko-ro"},
                                           "kokoro": {"Kokoro": "Koh-KOH-roh"}}})
-    assert substitute.rules_for(None, "af_heart", "pocket") == {"Kokoro": "Ko-ko-ro"}
-    assert substitute.rules_for(None, "af_heart", "kokoro") == {"Kokoro": "Koh-KOH-roh"}
+    assert _said(substitute.rules_for(None, "af_heart", "pocket")) == {"Kokoro": "Ko-ko-ro"}
+    assert _said(substitute.rules_for(None, "af_heart", "kokoro")) == {"Kokoro": "Koh-KOH-roh"}
     # No engine given: only the rules that hold for every engine.
-    assert substitute.rules_for(None, "af_heart") == {}
+    assert _said(substitute.rules_for(None, "af_heart")) == {}
 
 
 def test_the_most_specific_rule_wins():
@@ -147,20 +256,20 @@ def test_the_most_specific_rule_wins():
         "*": {"*": {"w": "any-any"}, "pocket": {"w": "any-pocket", "x": "x-any-pocket"}},
         "en": {"*": {"w": "en-any", "y": "y-en-any"}, "pocket": {"w": "en-pocket"}},
     })
-    assert substitute.rules_for(None, "af_heart", "pocket")["w"] == "en-pocket"
+    assert _said(substitute.rules_for(None, "af_heart", "pocket"))["w"] == "en-pocket"
     # language-any-engine beats "*" + engine ...
     settings.put("substitutions", {
         "*": {"pocket": {"w": "any-pocket"}}, "en": {"*": {"w": "en-any"}}})
-    assert substitute.rules_for(None, "af_heart", "pocket")["w"] == "en-any"
+    assert _said(substitute.rules_for(None, "af_heart", "pocket"))["w"] == "en-any"
     # ... which beats "*" for every engine.
     settings.put("substitutions", {"*": {"*": {"w": "any-any"}, "pocket": {"w": "any-pocket"}}})
-    assert substitute.rules_for(None, "af_heart", "pocket")["w"] == "any-pocket"
-    assert substitute.rules_for(None, "af_heart", "kokoro")["w"] == "any-any"
+    assert _said(substitute.rules_for(None, "af_heart", "pocket"))["w"] == "any-pocket"
+    assert _said(substitute.rules_for(None, "af_heart", "kokoro"))["w"] == "any-any"
 
 
 def test_a_stored_bad_engine_bucket_is_dropped_not_fatal():
     settings.put("substitutions", {"en": {"piper": {"a": "b"}, "pocket": {"c": 3}, "ok": "fine"}})
-    assert substitute.rules_for(None, "af_heart", "pocket") == {"ok": "fine"}
+    assert _said(substitute.rules_for(None, "af_heart", "pocket")) == {"ok": "fine"}
 
 
 def test_the_engine_follows_the_voice():
@@ -218,6 +327,21 @@ def test_the_server_knob_takes_the_rules(client):
     assert bad.status_code == 400
 
 
+def test_the_server_knob_keeps_the_case_flag(client):
+    rule = {"to": "United States", "case": True}
+    body = {"substitutions": {"en": {"US": rule, "Ave.": {"to": "Avenue", "case": False}}}}
+    response = client.put("/api/settings/server", headers=AUTH, json=body)
+    assert response.status_code == 200
+    assert response.json()["substitutions"] == {"en": {"*": {"US": rule, "Ave.": "Avenue"}}}
+    assert client.get("/api/settings/server", headers=AUTH).json()["substitutions"] == {
+        "en": {"*": {"US": rule, "Ave.": "Avenue"}}}
+
+    bad = client.put("/api/settings/server", headers=AUTH,
+                     json={"substitutions": {"en": {"US": {"to": "United States", "case": "yes"}}}})
+    assert bad.status_code == 400
+    assert '"case"' in bad.json()["detail"]
+
+
 # -------------------------------------------------------------- the pipeline
 
 def test_the_cache_key_follows_the_words_that_are_spoken():
@@ -226,6 +350,17 @@ def test_the_cache_key_follows_the_words_that_are_spoken():
     assert plain == tts._key("Kokoro is here.", "af_heart", "Kokoro is here.")
     # A rule that changes what is said is a different clip.
     assert plain != tts._key("Kokoro is here.", "af_heart", "Koh-KOH-roh is here.")
+
+
+def test_a_case_flag_that_changes_nothing_spoken_leaves_the_cache_key_alone():
+    # The key follows the spoken text, so a rule only changes a clip where it fires.
+    text = "We trust us."
+    rules = {"US": substitute.Rule("United States", True)}
+    spoken, _ = substitute.apply(text, rules)
+    assert tts._key(text, "af_heart", spoken) == tts._key(text, "af_heart")
+    # Flip the flag and the rule now fires on "us": a different clip.
+    spoken, _ = substitute.apply(text, {"US": substitute.Rule("United States", False)})
+    assert tts._key(text, "af_heart", spoken) != tts._key(text, "af_heart")
 
 
 def test_synthesis_speaks_the_rule_and_lights_the_original_word(monkeypatch, tmp_path):

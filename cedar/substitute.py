@@ -27,6 +27,15 @@ Matching is literal and whole-word: "cat" replaces "cat" and "Cat", but not
 says "Kokoro" -> "Koh-KOH-roh" produces that spelling whatever case the source
 had.
 
+A rule may instead match case: "US" -> "United States" replaces "US" but not
+"us", compared character for character (no casefolding). It is stored as
+``{"to": "United States", "case": true}`` where the plain form would put the
+replacement string; a rule without the flag stays a plain string, so rules
+written before the flag existed mean what they always did. Two rules that can
+match the same word are told apart by layer first (below) and, within a layer,
+a case-matching rule beats a case-insensitive one. A client that rewrites the
+rules as plain strings drops the flags.
+
 Rules are per language, with "*" for the ones that hold everywhere. The
 language comes from the voice, which is chosen to speak the language the text
 is in; "*" rules apply whatever the language turns out to be.
@@ -92,25 +101,50 @@ class Edit(NamedTuple):
     spoken_end: int
 
 
-class _Matcher:
-    """The compiled pattern for one set of rules, plus its lookup table."""
-    __slots__ = ("pattern", "lookup")
+class Rule(NamedTuple):
+    """What a word is replaced with, and whether the word has to match case.
 
-    def __init__(self, rules: dict[str, str]):
+    ``rank`` is how specific the layer the rule came from is (0 = "*" for every
+    engine ... 3 = the language's own for this engine); :func:`rules_for` sets it.
+    """
+    to: str
+    case: bool = False
+    rank: int = 0
+
+
+class _Matcher:
+    """The compiled pattern for one set of rules, plus its lookup tables."""
+    __slots__ = ("pattern", "exact", "folded")
+
+    def __init__(self, rules: dict[str, Rule]):
         # Longest first, so "cats" is tried before "cat" and the engine does
-        # not have to backtrack into it.
-        keys = sorted(rules, key=len, reverse=True)
+        # not have to backtrack into it. Among rules of the same length (the
+        # only ones that can match the same text) the more specific layer comes
+        # first, then a rule that matches case, and the alternation takes the
+        # first that fits.
+        ordered = sorted(rules.items(),
+                         key=lambda kv: (-len(kv[0]), -kv[1].rank, not kv[1].case))
+        # Each alternative carries its own case flag: (?i:..) folds, (?-i:..) is exact.
         self.pattern = re.compile(
-            r"(?<!\w)(?:" + "|".join(re.escape(k) for k in keys) + r")(?!\w)",
-            re.IGNORECASE)
-        # Casefolded, because the pattern matches case-insensitively: the
-        # spoken word may be "KOKORO" where the rule says "Kokoro". Two rules
-        # that differ only in case are the same rule as far as the pattern is
-        # concerned, so the first one wins here too — the lookup has to agree
-        # with the alternation, or a word would be replaced by the wrong one.
-        self.lookup: dict[str, str] = {}
-        for key in keys:
-            self.lookup.setdefault(key.casefold(), rules[key])
+            r"(?<!\w)(?:" + "|".join(
+                ("(?-i:" if rule.case else "(?i:") + re.escape(key) + ")"
+                for key, rule in ordered) + r")(?!\w)")
+        # The lookup has to agree with the alternation, or a word would be
+        # replaced by the wrong rule. Case-matching rules are looked up as
+        # written, the others casefolded (the text may say "KOKORO" where the
+        # rule says "Kokoro"); where both fit, the one earlier in `ordered` wins.
+        self.exact: dict[str, tuple[int, Rule]] = {}
+        self.folded: dict[str, tuple[int, Rule]] = {}
+        for n, (key, rule) in enumerate(ordered):
+            if rule.case:
+                self.exact.setdefault(key, (n, rule))
+            else:
+                self.folded.setdefault(key.casefold(), (n, rule))
+
+    def find(self, found: str) -> Optional[Rule]:
+        """The rule that replaces the matched text, if any."""
+        hits = [h for h in (self.exact.get(found), self.folded.get(found.casefold())) if h]
+        return min(hits)[1] if hits else None
 
 
 # Compiling a pattern out of a few hundred rules is the expensive part of a
@@ -122,8 +156,27 @@ _MATCHER_CACHE_MAX = 8
 
 # ------------------------------------------------------------------- validation
 
-def _check_rule(code: str, word: Any, replacement: Any) -> tuple[str, str]:
-    """One rule, trimmed and checked; raises :class:`RulesError` if unusable."""
+def _is_rule_object(value: Any) -> bool:
+    """Whether a dict is one rule (``{"to": ..., "case": ...}``) rather than an
+    engine's table of rules. A table only ever holds strings, so a "case" entry
+    that is not one gives the rule away — even a malformed one, which then gets
+    an error about the flag instead of about an engine."""
+    return isinstance(value, dict) and "case" in value and not isinstance(value["case"], str)
+
+
+def _check_rule(code: str, word: Any, replacement: Any) -> tuple[str, Any]:
+    """One rule, trimmed and checked; raises :class:`RulesError` if unusable.
+
+    Returns the word and the stored form: the replacement string, or
+    ``{"to": replacement, "case": True}`` for a rule that matches case.
+    """
+    case = False
+    if _is_rule_object(replacement):
+        if not isinstance(replacement["case"], bool):
+            raise RulesError(f"The case flag for {word!r} in the {code!r} rules must be true or false.")
+        if set(replacement) - {"to", "case"}:
+            raise RulesError(f"The rule for {word!r} in the {code!r} rules has unknown fields.")
+        case, replacement = replacement["case"], replacement.get("to")
     if not isinstance(word, str) or not isinstance(replacement, str):
         raise RulesError(f"The rules for {code!r} must be word -> replacement strings.")
     word, replacement = word.strip(), replacement.strip()
@@ -137,15 +190,17 @@ def _check_rule(code: str, word: Any, replacement: Any) -> tuple[str, str]:
         raise RulesError(f"The replacement for {word!r} is too long.")
     if not _WORDISH.search(word):
         raise RulesError(f"{word!r} has no letters or digits in it.")
-    return word, replacement
+    return word, ({"to": replacement, "case": True} if case else replacement)
 
 
-def validate(value: Any) -> dict[str, dict[str, dict[str, str]]]:
+def validate(value: Any) -> dict[str, dict[str, dict[str, Any]]]:
     """Check a substitution map and return it in canonical form.
 
     Accepts ``{language: {engine: {word: replacement}}}`` and the older
     ``{language: {word: replacement}}`` (every engine); the two may be mixed
-    inside one language. The result is always the nested form.
+    inside one language. The result is always the nested form. A replacement
+    is a string, or ``{"to": string, "case": true}`` for a rule that matches
+    case (``"case": false`` is the plain form and is stored as a string).
 
     Raises :class:`RulesError` with a message the owner can act on; the
     settings route turns that into a 400.
@@ -156,7 +211,7 @@ def validate(value: Any) -> dict[str, dict[str, dict[str, str]]]:
         raise RulesError("Substitutions must be an object of language -> {word: replacement}.")
     if len(value) > MAX_LANGUAGES:
         raise RulesError(f"Too many languages ({len(value)}); at most {MAX_LANGUAGES}.")
-    out: dict[str, dict[str, dict[str, str]]] = {}
+    out: dict[str, dict[str, dict[str, Any]]] = {}
     for code, table in value.items():
         if not isinstance(code, str):
             raise RulesError("A language key must be a string.")
@@ -167,12 +222,13 @@ def validate(value: Any) -> dict[str, dict[str, dict[str, str]]]:
             raise RulesError(f"The rules for {code!r} must be an object of word -> replacement.")
         buckets = out.setdefault(key, {})
         for word, replacement in table.items():
-            if isinstance(replacement, dict):
+            if isinstance(replacement, dict) and not _is_rule_object(replacement):
                 engine = word.strip().lower() if isinstance(word, str) else ""
                 if engine != ANY and engine not in ENGINES:
                     raise RulesError(
                         f"{word!r} in the {code!r} rules is not an engine "
-                        f"({', '.join(ENGINES)}, or '*').")
+                        f"({', '.join(ENGINES)}, or '*'). A rule that matches case needs "
+                        f'"to" and a "case" that is true or false.')
                 bucket = buckets.setdefault(engine, {})
                 for w, r in replacement.items():
                     w, r = _check_rule(code, w, r)
@@ -210,23 +266,28 @@ def _read() -> Any:
 # the settings is blocking I/O and this runs for every sentence the server
 # speaks, so the rules are held in memory and re-read only when the settings
 # have actually been written since.
-_cached: tuple[int, dict[str, dict[str, dict[str, str]]]] = (-1, {})
+_cached: tuple[int, dict[str, dict[str, dict[str, Rule]]]] = (-1, {})
 
 
-def _usable(table: Any) -> dict[str, str]:
-    """The word -> replacement pairs in ``table`` that can be used."""
-    kept: dict[str, str] = {}
+def _usable(table: Any) -> dict[str, Rule]:
+    """The word -> rule pairs in ``table`` that can be used."""
+    kept: dict[str, Rule] = {}
     if isinstance(table, dict):
         for word, replacement in table.items():
+            case = False
+            if _is_rule_object(replacement):
+                if not isinstance(replacement["case"], bool):
+                    continue
+                case, replacement = replacement["case"], replacement.get("to")
             if (isinstance(word, str) and isinstance(replacement, str)
                     and word.strip() and replacement.strip()):
-                kept[word.strip()] = replacement.strip()
+                kept[word.strip()] = Rule(replacement.strip(), case)
     return kept
 
 
-def _stored() -> dict[str, dict[str, dict[str, str]]]:
-    """The owner's rules as stored ({language: {engine: {word: replacement}}}),
-    with anything unusable dropped.
+def _stored() -> dict[str, dict[str, dict[str, Rule]]]:
+    """The owner's rules as stored ({language: {engine: {word: rule}}}), with
+    anything unusable dropped.
 
     The write path validates, but a rule map can also arrive from an older
     server (the flat form, before rules had engines) or a hand-edited database,
@@ -240,17 +301,19 @@ def _stored() -> dict[str, dict[str, dict[str, str]]]:
     raw = _read()
     if raw is None:
         return {}   # a failed read is not cached: try again next time
-    out: dict[str, dict[str, dict[str, str]]] = {}
+    out: dict[str, dict[str, dict[str, Rule]]] = {}
     if isinstance(raw, dict):
         for code, table in raw.items():
             if not isinstance(code, str) or not isinstance(table, dict):
                 continue
-            buckets: dict[str, dict[str, str]] = {}
-            flat = _usable({w: r for w, r in table.items() if not isinstance(r, dict)})
+            buckets: dict[str, dict[str, Rule]] = {}
+            flat = _usable({w: r for w, r in table.items()
+                            if not isinstance(r, dict) or _is_rule_object(r)})
             if flat:
                 buckets[ANY] = flat
             for engine, scoped in table.items():
-                if not isinstance(scoped, dict) or not isinstance(engine, str):
+                if (not isinstance(scoped, dict) or _is_rule_object(scoped)
+                        or not isinstance(engine, str)):
                     continue
                 engine = engine.strip().lower()
                 if engine != ANY and engine not in ENGINES:
@@ -280,31 +343,36 @@ def _language_of(language: Optional[str], voice: Optional[str]) -> str:
 
 
 def rules_for(language: Optional[str] = None, voice: Optional[str] = None,
-              engine: Optional[str] = None) -> dict[str, str]:
+              engine: Optional[str] = None) -> dict[str, Rule]:
     """The rules that apply to this text: the ones for every language, plus
     the ones for its own, each narrowed to ``engine`` where one is given.
 
     Layered least to most specific, so the later layer wins a clash: "*" for
     every engine, "*" for this engine, the language's for every engine, the
-    language's for this engine.
+    language's for this engine. Each rule carries its layer as ``rank``, for
+    the rules whose words differ but can still match the same text.
     """
     stored = _stored()
     code = _language_of(language, voice)
     engine = (engine or "").strip().lower()
-    rules: dict[str, str] = {}
-    for lang_code in (ANY, code):
+    rules: dict[str, Rule] = {}
+    for base, lang_code in ((0, ANY), (2, code)):
         buckets = stored.get(lang_code) if lang_code else None
         if not buckets:
             continue
-        rules.update(buckets.get(ANY) or {})
+        layers = [(base, buckets.get(ANY))]
         if engine in ENGINES:
-            rules.update(buckets.get(engine) or {})
+            layers.append((base + 1, buckets.get(engine)))
+        for rank, table in layers:
+            for word, rule in (table or {}).items():
+                rules[word] = rule._replace(rank=rank)
     return rules
 
 
-def _matcher(rules: dict[str, str]) -> Optional[_Matcher]:
+def _matcher(rules: dict[str, Any]) -> Optional[_Matcher]:
     if not rules:
         return None
+    rules = {word: rule if isinstance(rule, Rule) else Rule(rule) for word, rule in rules.items()}
     key = json.dumps(rules, sort_keys=True, ensure_ascii=False)
     matcher = _matchers.get(key)
     if matcher is None:
@@ -317,11 +385,11 @@ def _matcher(rules: dict[str, str]) -> Optional[_Matcher]:
 
 # ---------------------------------------------------------------- application
 
-def apply(text: str, rules: dict[str, str]) -> tuple[str, list[Edit]]:
+def apply(text: str, rules: dict[str, Any]) -> tuple[str, list[Edit]]:
     """``text`` with ``rules`` applied, and the edits that got there.
 
-    ``rules`` is a flat {word: replacement} map, as :func:`rules_for` returns
-    it. The edits say which part of the spoken text stands for which part of
+    ``rules`` is a flat {word: Rule} map, as :func:`rules_for` returns it (a
+    plain replacement string stands for a rule that ignores case). The edits say which part of the spoken text stands for which part of
     the original, so the word timings can be pointed back at the text the
     reader is looking at.
     """
@@ -330,17 +398,17 @@ def apply(text: str, rules: dict[str, str]) -> tuple[str, list[Edit]]:
     matcher = _matcher(rules)
     if matcher is None:
         return text, []
-    lookup = matcher.lookup
     parts: list[str] = []
     edits: list[Edit] = []
     orig_cursor = 0
     spoken = 0
     for m in matcher.pattern.finditer(text):
-        replacement = lookup.get(m.group(0).casefold())
-        if replacement is None:
+        rule = matcher.find(m.group(0))
+        if rule is None:
             # A case the lookup does not know (the pattern folds more than
             # str.casefold does): leave the word alone rather than guess.
             continue
+        replacement = rule.to
         gap = text[orig_cursor:m.start()]
         parts.append(gap)
         spoken += len(gap)

@@ -36,6 +36,15 @@ def test_the_csp_allows_only_its_own_script_and_same_origin_calls(client):
     assert not re.search(r"""(src|href)=["']https?:""", r.text)
 
 
+def test_the_page_offers_match_case_and_keeps_the_flag_through_save_and_export(client):
+    text = client.get("/substitutions").text
+    # The column, the shape a flagged rule is saved in, and the shape import reads back.
+    assert "<th" in text and "Match case" in text
+    assert "{ to: repl, case: true }" in text
+    assert "matchCase" in text and "isRule" in text
+    assert "must be true or false" in text
+
+
 def test_only_the_exact_path_is_open(client):
     for path in ("/substitutions/", "/substitutions/x", "/substitutions.html",
                  "/static/substitutions.html", "/Substitutions"):
