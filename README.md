@@ -542,6 +542,22 @@ Matching is literal and whole-word — `cat` replaces
 The text on the screen is left alone: only the voice changes, and the word
 highlight still lights the words the reader is looking at.
 
+To match case, give the rule as `{"to": replacement, "case": true}` instead of
+a plain string (the editor has a Match case checkbox). `"US"` then replaces
+`US` but not `us`, compared character for character:
+
+```json
+{"en": {"US": {"to": "United States", "case": true}, "Ave.": "Avenue"}}
+```
+
+A longer rule is tried before a shorter one whether or not either matches
+case. When two rules of the same length fit the same word, the more specific
+layer wins, then the one that matches case. A tool that rewrites the rules as
+plain strings drops the flags.
+
+The rules also apply to the [OpenAI-compatible speech API](#optional-openai-compatible-speech-api),
+which speaks the same substituted text as the reader.
+
 ## Optional: the book store (public-domain classics)
 
 <img src="docs/img/store.webp" width="230" align="right" alt="The Classics tab: a featured book, Top Books and Fiction shelves">
@@ -669,11 +685,46 @@ the status page at `/`) is open.
 
 `/tts` returns `{format, audio_b64, words:[{start,end,cs,ce}], duration}`.
 
+### Optional OpenAI-compatible speech API
+
+Cedar can also answer the OpenAI text-to-speech API, so tools that already speak
+it (an OpenAI SDK, Open WebUI, and the like) can use your Cedar voices. It is off
+until you set `CEDAR_TTS_KEY` (16+ characters, different from `CEDAR_KEY`). That
+key opens `/v1` and nothing else, and the owner key does not open `/v1`, so such
+a client can never reach your library.
+
+Point the client's base URL at `http://<server>:8000/v1` and use the TTS key as
+its API key:
+
+```bash
+curl http://localhost:8000/v1/audio/speech \
+     -H "Authorization: Bearer $CEDAR_TTS_KEY" -H 'Content-Type: application/json' \
+     -d '{"model": "tts-1", "voice": "alloy", "input": "Hello from Cedar."}' \
+     --output hello.mp3
+```
+
+| | |
+|---|---|
+| `POST /v1/audio/speech` | the same body as OpenAI's (`input`, `voice`, `response_format`); answers with raw audio |
+| `GET /v1/models` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, `kokoro` |
+| `GET /v1/audio/voices` | the OpenAI voice names, then the engine's own voice ids |
+
+- `response_format` is `mp3` (the default), `wav` or `pcm`. Anything else is a 400.
+- `input` is limited to 4096 characters, as in OpenAI's API.
+- OpenAI voice names (`alloy`, `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`,
+  `onyx`, `sage`, `shimmer`, `verse`) speak the nearest Kokoro voice. A Kokoro id,
+  a blend or a Pocket voice is passed through unchanged, and leaving `voice` out
+  uses your main reading voice.
+- `model`, `speed` and `instructions` are accepted and ignored.
+- Your [word substitutions](#word-substitutions) apply here too.
+- Errors come back in OpenAI's `{"error": {...}}` shape.
+- There is no word timing in this API; use `/api/live/tts` for that.
+
 ### Optional Pocket stream for Android clients
 
 `POST /api/live/tts/stream` lets an updated client start playing Pocket audio
 before inference finishes. This is Cedar's own protocol, not an OpenAI-compatible
-endpoint. `/api/live/tts` keeps its existing complete MP3 response and word map.
+endpoint (see [the OpenAI-compatible speech API](#optional-openai-compatible-speech-api) for that). `/api/live/tts` keeps its existing complete MP3 response and word map.
 Use the usual `Authorization: Bearer <owner-key>` (or `X-Cedar-Key`) and JSON:
 
 ```json
