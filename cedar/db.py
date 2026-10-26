@@ -132,8 +132,11 @@ def init_db() -> None:
         version = c.execute("PRAGMA user_version").fetchone()[0]
         for n, script in enumerate(_MIGRATIONS, start=1):
             if n > version:
-                c.executescript(script)
-                c.execute(f"PRAGMA user_version = {n}")
+                # One transaction per migration, version bump included: a crash
+                # part-way leaves the database at the previous version, not
+                # half-migrated. (executescript commits on its own, so the
+                # transaction is opened inside the script.)
+                c.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {n};\nCOMMIT;")
 
 
 def schema_version() -> int:

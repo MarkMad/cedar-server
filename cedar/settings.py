@@ -13,6 +13,7 @@ create a setting nothing reads.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from typing import Any
 
@@ -77,20 +78,27 @@ def get(key: str, default: Any = None) -> Any:
         return default
 
 
+def _bump() -> None:
+    """Move the revision. Call it after the writing transaction has committed:
+    a reader that sees the new number must also see the new data, or it would
+    cache the old values under it."""
+    global _revision
+    _revision += 1
+
+
 def put(key: str, value: Any) -> None:
     with connect() as c:
         _put(c, key, value)
+    _bump()
 
 
 def _put(c: sqlite3.Connection, key: str, value: Any) -> None:
-    global _revision
     if value is None:
         c.execute("DELETE FROM settings WHERE key=?", (key,))
     else:
         c.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (key, json.dumps(value)))
-    _revision += 1
 
 
 # ------------------------------------------------------------------- server knobs
@@ -109,17 +117,45 @@ def update_knobs(patch: dict[str, Any]) -> dict[str, Any]:
     with connect() as c:
         for k, v in values.items():
             _put(c, k, v)
+    _bump()
     return knobs()
+
+
+# Bounds for the numeric knobs: (smallest, largest), the smallest exclusive for
+# the timeouts (0 would mean "give up before asking").
+_BOUNDS: dict[str, tuple[float, float]] = {
+    "dict_timeout_s": (0.0, 60.0),
+    "translate_timeout_s": (0.0, 60.0),
+    "dict_hedge_ms": (0, 60_000),
+}
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0"):
+        return value.strip().lower() in ("true", "1")
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError("expected true or false")
 
 
 def _coerce(key: str, value: Any) -> Any:
     default = KNOBS[key]
     if isinstance(default, bool):
-        return bool(value)
-    if isinstance(default, int):
-        return int(value)
-    if isinstance(default, float):
-        return float(value)
+        return _coerce_bool(value)
+    if isinstance(default, (int, float)):
+        if isinstance(value, bool):
+            raise TypeError(f"{key} must be a number")
+        try:
+            number = int(value) if isinstance(default, int) else float(value)
+        except OverflowError:
+            raise ValueError(f"{key} is out of range") from None
+        low, high = _BOUNDS.get(key, (float("-inf"), float("inf")))
+        exclusive = isinstance(default, float) and key in _BOUNDS
+        if not math.isfinite(number) or number > high or number < low or (exclusive and number == low):
+            raise ValueError(f"{key} is out of range")
+        return number
     if isinstance(default, dict):
         # A structured knob. The route that accepts it checks the shape; all
         # that is left here is to keep it a JSON object.
@@ -177,6 +213,7 @@ def set_voice(voice: str, language: str | None = None) -> None:
             voices[language] = voice
         _put(c, "voices", voices)
         _put(c, "voice", voice)
+    _bump()
 
 
 def reading_defaults() -> tuple[str, float]:

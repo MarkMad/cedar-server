@@ -192,3 +192,60 @@ def test_failed_rechunk_cannot_be_committed_by_next_document(database, monkeypat
     assert db.get_document(first)["content_rev"] == 1
     assert db.list_bookmarks(first)[0]["idx"] == 1
     assert db.get_document(second)["content_rev"] == 2
+
+
+def test_settings_revision_moves_only_after_commit(database, monkeypatch):
+    seen = []
+    original = settings._put
+
+    def spy(c, key, value):
+        original(c, key, value)
+        seen.append(settings.revision())
+
+    monkeypatch.setattr(settings, "_put", spy)
+    before = settings.revision()
+    settings.update_knobs({"catalog_full": True})
+    assert seen == [before]            # not yet bumped while the write was open
+    assert settings.revision() == before + 1
+
+
+def test_failed_write_does_not_move_the_revision(database):
+    before = settings.revision()
+    with pytest.raises(ValueError):
+        settings.update_knobs({"dict_timeout_s": "invalid"})
+    assert settings.revision() == before
+
+
+@pytest.mark.parametrize("value, expected", [("false", False), ("true", True), (0, False), (True, True)])
+def test_boolean_knob_reads_strings_properly(database, value, expected):
+    assert settings.update_knobs({"catalog_full": value})["catalog_full"] is expected
+
+
+@pytest.mark.parametrize("patch", [
+    {"catalog_full": "maybe"}, {"catalog_full": [1]},
+    {"dict_timeout_s": -1}, {"dict_timeout_s": 0}, {"dict_timeout_s": float("nan")},
+    {"dict_timeout_s": float("inf")}, {"dict_timeout_s": 1e9}, {"translate_timeout_s": True},
+    {"dict_hedge_ms": -5}, {"dict_hedge_ms": float("inf")},
+])
+def test_out_of_range_knobs_are_refused(database, patch):
+    before = settings.knobs()
+    with pytest.raises((ValueError, TypeError)):
+        settings.update_knobs(patch)
+    assert settings.knobs() == before
+
+
+def test_failed_migration_leaves_the_version_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cedar.db")
+    monkeypatch.setattr(db, "_MIGRATIONS", [
+        "CREATE TABLE a (x);",
+        "CREATE TABLE b (x); CREATE TABLE b (x);",   # fails after the first statement
+    ])
+    with pytest.raises(sqlite3.OperationalError):
+        db.init_db()
+    assert db.schema_version() == 1
+    with db.connect() as c:
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "a" in tables and "b" not in tables
+    monkeypatch.setattr(db, "_MIGRATIONS", ["CREATE TABLE a (x);", "CREATE TABLE b (x);"])
+    db.init_db()
+    assert db.schema_version() == 2
